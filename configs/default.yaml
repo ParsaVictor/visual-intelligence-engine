@@ -1,0 +1,79 @@
+# Single source of truth for every threshold and class list.
+#
+# The original notebooks declared these constants twice — once in the indexing
+# pass and once in the search pass — and the two copies drifted apart. Defining
+# them here once, with the gate/search relationship validated at load time,
+# makes that class of bug impossible rather than merely fixed.
+
+project:
+  name: visual-intelligence-engine
+  seed: 42
+
+paths:
+  gallery: data/gallery
+  database: data/index.db
+
+runtime:
+  device: auto          # auto | cuda | cpu
+  half_precision: true  # applies to CLIP only; see docs/design-decisions.md
+
+models:
+  clip: openai/clip-vit-large-patch14
+  face_pack: buffalo_l
+  animal_detector: md_v5a.0.0.pt
+  object_detector: rtdetr-x.pt
+
+face:
+  # ArcFace embeddings are L2-normalised, so a dot product is cosine similarity.
+  match_threshold: 0.46
+  det_size_large: 640
+  det_size_small: 320
+  small_image_px: 400
+  # Index-time image cap; large press photos are downscaled before detection.
+  max_index_dimension: 1000
+
+animal:
+  # MegaDetector v5a raw YOLOv5 head: 0=animal, 1=person, 2=vehicle.
+  # NOTE this differs from MegaDetector's published JSON API (1/2/3).
+  animal_class_id: 0
+
+  # The gate runs at index time and decides has_animal. It must be at least as
+  # permissive as the search pass: an image the gate rejects can never be
+  # reached later, so a looser search threshold buys nothing and only admits
+  # noise. Enforced by Config.validate().
+  gate_confidence: 0.30
+  search_confidence: 0.40
+
+  # Crop handling before recognition.
+  padding_ratio: 0.15
+  min_crop_px: 40
+
+  # Zero-shot recognition via CLIP. Replaces the ImageNet-1k classifier and its
+  # hand-written keyword map entirely.
+  match_threshold: 0.55
+  negative_prompts:
+    - "a photo of a different kind of animal"
+    - "a photo of scenery with no animal in it"
+  prompt_template: "a photo of a {query}"
+
+food:
+  # COCO class ids. 56 is 'chair' and is deliberately absent — the original
+  # search pass included it and cropped furniture into CLIP.
+  gate_classes:   [39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55]
+  search_classes: [45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55]
+  gate_confidence: 0.15
+  search_confidence: 0.25
+
+  min_crop_px: 50
+  padding_px: 20
+
+  match_threshold: 0.60
+  negative_prompts:
+    - "a photo of a completely different food"
+    - "a photo of an empty plate or background"
+
+  # Reject a food box that sits mostly on top of a detected face.
+  face_overlap_reject: 0.50
+
+text:
+  top_k: 5

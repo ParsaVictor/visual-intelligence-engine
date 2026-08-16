@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "visual-intelligence-engine"
+version = "0.1.0"
+description = "Multimodal search over an image archive: faces, species, food and free text on one index"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Mohammad Parsa Karkooti", email = "1.parsa.karkooti@gmail.com" }]
+dependencies = ["numpy>=1.24", "pyyaml>=6.0"]
+
+[project.optional-dependencies]
+# Model runtimes are a separate extra so the core logic — and its test suite —
+# can be installed and exercised without a multi-gigabyte download.
+models = [
+  "torch>=2.1",
+  "torchvision>=0.16",
+  "transformers>=4.36",
+  "ultralytics>=8.1",
+  "insightface>=0.7",
+  "onnxruntime-gpu>=1.17",
+  "opencv-python>=4.8",
+  "pillow>=10.0",
+]
+dev = ["pytest>=7.4", "ruff>=0.4"]
+
+[project.scripts]
+vie = "vie.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["src"]
