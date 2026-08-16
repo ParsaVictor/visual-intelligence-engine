@@ -24,6 +24,7 @@ models = [
   "opencv-python>=4.8",
   "pillow>=10.0",
 ]
+demo = ["gradio>=4.44"]
 dev = ["pytest>=7.4", "ruff>=0.4"]
 
 [project.scripts]
