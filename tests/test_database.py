@@ -68,9 +68,8 @@ def test_candidate_prefilter_returns_only_flagged_images(index: Index) -> None:
 
 
 def test_unknown_flag_is_rejected(index: Index) -> None:
-    with index.connect() as conn:
-        with pytest.raises(ValueError, match="unknown flag"):
-            index.candidates(conn, "has_robots; DROP TABLE gallery_meta")
+    with index.connect() as conn, pytest.raises(ValueError, match="unknown flag"):
+        index.candidates(conn, "has_robots; DROP TABLE gallery_meta")
 
 
 def test_unchanged_file_is_not_reindexed(index: Index) -> None:

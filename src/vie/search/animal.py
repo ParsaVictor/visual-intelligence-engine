@@ -44,8 +44,8 @@ survive the downscale to the model's input size.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 from vie.config import Config

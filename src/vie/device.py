@@ -72,10 +72,9 @@ def resolve(preference: str = "auto", half_precision: bool = True) -> Runtime:
     """
     import torch
 
+    name = preference
     if preference == "auto":
         name = "cuda" if torch.cuda.is_available() else "cpu"
-    else:
-        name = preference
 
     device = torch.device(name)
     if device.type == "cuda" and not torch.cuda.is_available():

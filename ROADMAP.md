@@ -37,10 +37,15 @@ Each task ID maps to one issue — 39 in total.
 
 ---
 
-## Phase 1 — Critical correctness fixes
+## Phase 1 — Critical correctness fixes ✅ **COMPLETE**
 
-> Goal: stop the system returning wrong answers. **Highest value per hour in the
-> whole roadmap — roughly 5 hours removes every known critical defect.**
+> Goal: stop the system returning wrong answers.
+>
+> Every defect below is now fixed **and pinned by a regression test**, so none can
+> silently return. 83 tests, no GPU or model download required to run them.
+>
+> P1-1, P1-3 and P1-5 were not patched — they were removed by construction, because
+> the animal path no longer contains a keyword map that can be wrong (see P3-1).
 
 | ID | Cat | Task | Acceptance criterion | Est. |
 |:--|:--:|:--|:--|:--:|
