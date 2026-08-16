@@ -1,0 +1,68 @@
+# ─────────────────────────────────────────────────────────────
+# SAFETY FIRST — this project processes photographs of real,
+# identifiable people. Nothing below may ever enter git history.
+# ─────────────────────────────────────────────────────────────
+
+# Source imagery and any derived biometric data
+gallery/
+data/
+my_gallery/
+*.db
+*.sqlite
+*.sqlite3
+
+# Model weights (downloaded at runtime, hundreds of MB)
+*.pt
+*.pth
+*.onnx
+*.safetensors
+weights/
+checkpoints/
+
+# Cached embeddings / indexes
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.faiss
+*.index
+cache/
+
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# ─── Tooling ───
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# ─── Secrets ───
+.env
+.env.*
+*.key
+*.pem
+credentials.json
+secrets.yaml
+
+# ─── OS / editors ───
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+
+# ─── Allowed exceptions ───
+# Curated demo screenshots and diagrams are intentionally tracked.
+!assets/**
+!docs/**
