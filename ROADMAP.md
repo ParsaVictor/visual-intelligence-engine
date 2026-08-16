@@ -4,7 +4,8 @@ How this project gets from four Colab notebooks to a repository that holds up to
 international review. Every task below has an acceptance criterion, so "done" is
 never a matter of opinion.
 
-Progress is tracked on the GitHub Project board. Each task ID maps to one issue.
+Progress is tracked on the [GitHub Project board](https://github.com/users/ParsaVictor/projects/2).
+Each task ID maps to one issue — 39 in total.
 
 ---
 
