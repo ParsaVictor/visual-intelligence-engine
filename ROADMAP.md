@@ -23,7 +23,7 @@ Each task ID maps to one issue — 39 in total.
 
 ---
 
-## Phase 0 — Foundation & Safety
+## Phase 0 — Foundation & Safety — *one item open (P0-3)*
 
 > Goal: a repository that is safe to work in. Nothing here changes behaviour.
 
@@ -58,7 +58,7 @@ Each task ID maps to one issue — 39 in total.
 
 ---
 
-## Phase 2 — Architecture
+## Phase 2 — Architecture ✅ **COMPLETE**
 
 > Goal: turn four notebooks into one installable package with a real data layer.
 
@@ -74,7 +74,7 @@ Each task ID maps to one issue — 39 in total.
 
 ---
 
-## Phase 3 — Models & algorithms
+## Phase 3 — Models & algorithms ✅ **COMPLETE**
 
 > Goal: every module as strong as the best one. The food module's contrastive-candidate
 > design is the internal benchmark — the others should match it.
@@ -90,7 +90,7 @@ Each task ID maps to one issue — 39 in total.
 
 ---
 
-## Phase 4 — Engineering quality
+## Phase 4 — Engineering quality ✅ **COMPLETE**
 
 | ID | Cat | Task | Acceptance criterion | Est. |
 |:--|:--|:--|:--|:--|
@@ -103,7 +103,7 @@ Each task ID maps to one issue — 39 in total.
 
 ---
 
-## Phase 5 — Presentation
+## Phase 5 — Presentation ✅ **COMPLETE**
 
 | ID | Cat | Task | Acceptance criterion | Est. |
 |:--|:--|:--|:--|:--|
@@ -115,7 +115,7 @@ Each task ID maps to one issue — 39 in total.
 
 ---
 
-## Phase 6 — Scale & polish
+## Phase 6 — Scale & polish — *partially done*
 
 > Nothing here is needed today. Listed so the growth path is explicit.
 
@@ -143,6 +143,20 @@ Phase 0  ─────┐
                                                                     Phase 6 when scale demands
 ```
 
-**Do not make the repository public before Phase 1 and P0-3 are complete.** Publishing
-a known-broken species mapping, or client-owned code without a licensing decision, is
-harder to undo than to delay.
+## Where this stands
+
+Phases 1 through 5 are complete: every known correctness defect is fixed and pinned by a
+regression test, the notebooks are an installable package with a CLI, and the docs match
+the code. 120 tests run in about two seconds with no GPU and no model download.
+
+Two things remain, and neither can be done from the code:
+
+1. **P0-3 — ownership and licence.** The original work was produced in a client context.
+   Until ownership and the right to publish are confirmed in writing, the repository
+   stays private and `LICENSE` stays unset. **This is the only blocker on going public.**
+2. **P4-4 — measured benchmarks.** `scripts/benchmark.py` is written and ready, but it
+   has not been run: that needs the real gallery and a GPU. Until then the README claims
+   no performance figures at all, which is deliberate.
+
+Everything else on this page is either done or explicitly deferred with a trigger
+recorded (Phase 6).
