@@ -9,8 +9,6 @@ from vie.search import face, food, text
 
 
 # ── face ──────────────────────────────────────────────────────────────
-
-
 def _unit(values: list[float]) -> np.ndarray:
     v = np.array(values, dtype=np.float32)
     return v / np.linalg.norm(v)
@@ -83,8 +81,6 @@ def test_detection_size_scales_with_the_image(config) -> None:
 
 
 # ── text ──────────────────────────────────────────────────────────────
-
-
 def test_text_search_ranks_by_similarity(config) -> None:
     query = _unit([1.0, 0.0])
     indexed = [
@@ -121,8 +117,6 @@ def test_relative_confidence_of_empty_input() -> None:
 
 
 # ── food ──────────────────────────────────────────────────────────────
-
-
 class FakeScorer:
     def __init__(self, rows):
         self.rows = rows
