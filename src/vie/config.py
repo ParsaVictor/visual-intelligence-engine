@@ -49,6 +49,9 @@ class AnimalConfig:
     search_confidence: float
     padding_ratio: float
     min_crop_px: int
+    classifier: str
+    classifier_top_k: int
+    classifier_threshold: float
     match_threshold: float
     negative_prompts: list[str]
     prompt_template: str
@@ -158,6 +161,7 @@ class Config:
         for name, value in (
             ("face.match_threshold", self.face.match_threshold),
             ("animal.match_threshold", self.animal.match_threshold),
+            ("animal.classifier_threshold", self.animal.classifier_threshold),
             ("food.match_threshold", self.food.match_threshold),
         ):
             if not 0.0 <= value <= 1.0:

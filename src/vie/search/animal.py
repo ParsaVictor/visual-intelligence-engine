@@ -1,45 +1,45 @@
-"""Animal search — CLIP zero-shot, replacing the ImageNet classifier.
+"""Animal search — a hybrid of a supervised classifier and CLIP.
 
-What this replaces
-------------------
-The original module was MegaDetector (localise) → MobileNetV3-Small (label) →
-a hand-written map collapsing ImageNet's 1000 class names into 8 buckets by
-substring containment. That map was verified broken against the real class
-list:
+Why hybrid
+----------
+Two models answer "which animal is this", and they are good at different things:
 
-===========================  ========================  ==================
-class                        assigned category         cause
-===========================  ========================  ==================
-``African elephant``         Insect / Arthropod        ``eleph``\\ **ant**
-``giant panda``              Insect / Arthropod        ``gi``\\ **ant**
-``wild boar``                Reptile / Amphibian       **boa**\\ ``r``
-``sea lion``                 Cat                       **lion**
-``mailbox``                  Large Mammal              **ox**
-``bathtub``                  Small Mammal / Primate    **bat**
-``beer bottle``              Insect / Arthropod        **bee**
-===========================  ========================  ==================
+===================  ==========  ===========  ==========  ==================
+model                params      GFLOPs/crop  ImageNet    vocabulary
+===================  ==========  ===========  ==========  ==================
+MobileNetV3-Large    5.5 M       0.217        74.0 %      398 animal classes
+CLIP ViT-L/14        428 M       ~81          ~75.5 %     open
+===================  ==========  ===========  ==========  ==================
 
-Three separate defects came out of that design — the broken map, the absence of
-any confidence floor, and unanchored query matching against a category string
-that literally contains the word "non-animal". All three disappear here rather
-than being patched, because the keyword map is gone entirely.
+CLIP costs roughly **373x the compute per crop** for about 1.5 points of
+top-1 — a bad trade when the species is one the classifier already knows.
+But it is the *only* option when it is not: ``quokka`` is not an ImageNet
+class, so no supervised ImageNet model can ever return it.
 
-Why CLIP
---------
-CLIP ViT-L/14 is *already* loaded for the food and free-text paths, already in
-FP16, and already resident in VRAM. Using it here costs nothing extra and buys:
+So the classifier is the primary path and CLIP is the fallback:
 
-* an open vocabulary — ``red panda`` and ``fennec fox`` work despite not being
-  ImageNet-1k classes;
-* a calibrated decision, via the same contrastive-candidate trick the food
-  module pioneered: score the query against explicit rival prompts and take a
-  softmax, so the model can say "none of these";
-* one recognition pattern shared by three of the four search paths.
+.. code-block:: text
 
-MegaDetector is kept as the localiser. That part of the original design was
-right: a class-agnostic detector gives a species-independent recall gate, and
-cropping before recognition is what makes a small animal in a large press photo
-survive the downscale to the model's input size.
+    query -> resolve against ImageNet vocabulary
+               in vocabulary  -> precomputed predictions   (pure SQL, no inference)
+               out of it      -> CLIP over candidate crops (expensive, rare)
+
+The classifier also moves to **index time**. Each animal crop is classified
+once when the image is ingested and its top-k predictions are stored, so an
+in-vocabulary query runs no model at all — the original re-ran both MegaDetector
+*and* the classifier on every candidate, for every query.
+
+What the original got wrong, and what it got right
+--------------------------------------------------
+The defect was never MobileNetV3. It reported ``African elephant`` correctly.
+The damage was done by a layer that collapsed 1000 class names into 8 buckets
+with unanchored substring tests, so ``eleph``**ant** became *Insect*. That layer
+is gone; queries now match the real class names with word boundaries
+(:mod:`vie.species`).
+
+MegaDetector stays as the localiser. A class-agnostic detector gives a
+species-independent recall gate, and cropping before recognition is what lets an
+animal occupying 4 % of a press photo survive the downscale to 224 px.
 """
 
 from __future__ import annotations
@@ -51,18 +51,21 @@ from typing import Protocol
 from vie.config import Config
 from vie.geometry import Box, is_large_enough, pad_box
 from vie.scoring import Match, best_per_image, contrastive_score
+from vie.species import Resolution, resolve
 
 
 class CropScorer(Protocol):
-    """Anything that can score image crops against text prompts.
-
-    Declaring this as a protocol keeps the search logic testable without a GPU,
-    a model download, or a network call — the decision rules are what the
-    regression tests need to pin, not CLIP's weights.
-    """
+    """Scores image crops against text prompts (CLIP)."""
 
     def score(self, crops: Sequence[object], prompts: Sequence[str]) -> list[list[float]]:
-        """Return one logit vector per crop, aligned with ``prompts``."""
+        ...
+
+
+class CropClassifier(Protocol):
+    """Classifies image crops into a fixed vocabulary (MobileNetV3)."""
+
+    def classify(self, crops: Sequence[object], top_k: int) -> list[list[tuple[int, float]]]:
+        """Return ``(class_id, probability)`` pairs per crop, best first."""
 
 
 @dataclass(frozen=True)
@@ -75,16 +78,23 @@ class Candidate:
     detector_confidence: float
 
 
+@dataclass(frozen=True)
+class Prediction:
+    """A stored classifier result for one crop."""
+
+    file_name: str
+    file_path: str
+    box: Box
+    class_id: int
+    probability: float
+
+
 def select_crops(
     candidates: Sequence[Candidate],
     config: Config,
     image_size: tuple[int, int],
 ) -> list[Candidate]:
-    """Apply the size and padding rules before recognition.
-
-    The original applied padding but no minimum size, so a 12x9 px detection was
-    upsampled roughly 20x and handed back a confident-looking species label.
-    """
+    """Apply the size and padding rules before recognition."""
     width, height = image_size
     kept: list[Candidate] = []
     for candidate in candidates:
@@ -92,28 +102,74 @@ def select_crops(
             continue
         if not is_large_enough(candidate.box, config.animal.min_crop_px):
             continue
-        padded = pad_box(candidate.box, width, height, ratio=config.animal.padding_ratio)
         kept.append(
             Candidate(
                 candidate.file_name,
                 candidate.file_path,
-                padded,
+                pad_box(candidate.box, width, height, ratio=config.animal.padding_ratio),
                 candidate.detector_confidence,
             )
         )
     return kept
 
 
-def rank(
+# ── path 1: in-vocabulary, served from the index ───────────────────────
+
+
+def rank_from_index(
+    resolution: Resolution,
+    predictions: Sequence[Prediction],
+    config: Config,
+    class_names: Sequence[str] | None = None,
+) -> list[Match]:
+    """Rank using classifier predictions computed at index time.
+
+    No model runs here. This is the common case — a photo editor searching
+    ``zebra`` or ``golden retriever`` — and it costs one indexed SQL scan.
+    """
+    if not resolution.in_vocabulary:
+        raise ValueError("query is not in the classifier vocabulary; use CLIP instead")
+
+    wanted = set(resolution.class_ids)
+    matches: list[Match] = []
+    for prediction in predictions:
+        if prediction.class_id not in wanted:
+            continue
+        # The confidence floor the original never had: it accepted a 21.5 %
+        # top-1 over 1000 classes as a confirmed match.
+        if prediction.probability < config.animal.classifier_threshold:
+            continue
+        label = (
+            class_names[prediction.class_id]
+            if class_names is not None and prediction.class_id < len(class_names)
+            else resolution.query
+        )
+        matches.append(
+            Match(
+                file_name=prediction.file_name,
+                file_path=prediction.file_path,
+                score=prediction.probability,
+                box=prediction.box,
+                label=label,
+            )
+        )
+    return best_per_image(matches)
+
+
+# ── path 2: out of vocabulary, CLIP ────────────────────────────────────
+
+
+def rank_with_clip(
     query: str,
     candidates: Sequence[Candidate],
     crops: Sequence[object],
     scorer: CropScorer,
     config: Config,
 ) -> list[Match]:
-    """Score crops against the query and return one ranked result per image.
+    """Rank with CLIP scored against contrastive prompts.
 
-    ``candidates[i]`` must describe ``crops[i]``.
+    Reserved for species the classifier's vocabulary cannot express, because it
+    costs ~373x the compute per crop.
     """
     if len(candidates) != len(crops):
         raise ValueError(f"{len(candidates)} candidates but {len(crops)} crops")
@@ -124,16 +180,13 @@ def rank(
     if not query:
         raise ValueError("empty query")
 
-    prompts = config.animal.prompts_for(query)
-    logits = scorer.score(crops, prompts)
+    logits = scorer.score(crops, config.animal.prompts_for(query))
     if len(logits) != len(crops):
         raise ValueError(f"scorer returned {len(logits)} rows for {len(crops)} crops")
 
     matches: list[Match] = []
     for candidate, row in zip(candidates, logits, strict=True):
         score = contrastive_score(list(row))
-        # The confidence floor the original module never had. A 21.5% top-1 over
-        # 1000 classes was previously shipped as a confirmed match.
         if score < config.animal.match_threshold:
             continue
         matches.append(
@@ -146,3 +199,32 @@ def rank(
             )
         )
     return best_per_image(matches)
+
+
+# ── the router ─────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Route:
+    """Which engine will answer, and why."""
+
+    engine: str                 # "classifier" | "clip"
+    resolution: Resolution
+
+    def explain(self) -> str:
+        if self.engine == "classifier":
+            return (
+                f"'{self.resolution.query}' resolved to "
+                f"{len(self.resolution.class_ids)} ImageNet class(es) via "
+                f"{self.resolution.via} — answering from the index, no inference"
+            )
+        return (
+            f"'{self.resolution.query}' is outside the classifier vocabulary — "
+            f"falling back to CLIP over candidate crops"
+        )
+
+
+def choose_route(query: str, class_names: Sequence[str]) -> Route:
+    """Decide which engine answers this query."""
+    resolution = resolve(query, list(class_names))
+    return Route("classifier" if resolution.in_vocabulary else "clip", resolution)

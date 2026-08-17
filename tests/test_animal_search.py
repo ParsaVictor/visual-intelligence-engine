@@ -1,125 +1,202 @@
-"""Regression tests for P3-1 / P1-1 / P1-3 / P1-5: the rewritten animal path.
-
-These pin the *decision rules*, which is where every original defect lived. The
-CLIP weights are stubbed out — a fake scorer is enough to prove that a losing
-query is rejected, that small crops never reach recognition, and that one image
-cannot appear twice.
-"""
+"""Tests for the hybrid animal path: classifier first, CLIP as fallback."""
 
 from __future__ import annotations
 
 import pytest
 
-from vie.search.animal import Candidate, rank, select_crops
+from vie.search.animal import (
+    Candidate,
+    Prediction,
+    choose_route,
+    rank_from_index,
+    rank_with_clip,
+    select_crops,
+)
+
+CLASSES = [
+    "zebra", "lion", "sea lion", "African elephant", "Indian elephant",
+    "golden retriever", "Bedlington terrier", "tabby, tabby cat",
+    "Egyptian cat", "timber wolf", "ant", "bee", "mailbox", "bathtub",
+]
 
 
 class FakeScorer:
-    """Returns preset logits so the decision rules can be tested in isolation."""
-
-    def __init__(self, rows: list[list[float]]) -> None:
+    def __init__(self, rows):
         self.rows = rows
-        self.seen_prompts: list[str] | None = None
+        self.seen_prompts = None
 
     def score(self, crops, prompts):
         self.seen_prompts = list(prompts)
         return self.rows[: len(crops)]
 
 
-def _candidate(name="a.jpg", box=(0, 0, 100, 100), conf=0.9) -> Candidate:
+def _candidate(name="a.jpg", box=(0, 0, 200, 200), conf=0.9) -> Candidate:
     return Candidate(name, f"/g/{name}", box, conf)
 
 
-# ---- selection --------------------------------------------------------
+def _prediction(name="a.jpg", class_id=0, prob=0.9, box=(0, 0, 200, 200)) -> Prediction:
+    return Prediction(name, f"/g/{name}", box, class_id, prob)
 
 
-def test_small_crops_are_dropped_before_recognition(config) -> None:
-    """P3-6: a 12x9 detection upsampled to 224x224 used to get a species label."""
-    kept = select_crops([_candidate(box=(0, 0, 12, 9))], config, (1000, 1000))
-    assert kept == []
+# ── routing: which engine answers ──────────────────────────────────────
 
 
-def test_large_crops_survive(config) -> None:
-    kept = select_crops([_candidate(box=(0, 0, 200, 200))], config, (1000, 1000))
-    assert len(kept) == 1
+@pytest.mark.parametrize("query", ["zebra", "lion", "golden retriever", "elephant"])
+def test_in_vocabulary_queries_use_the_cheap_classifier(query: str) -> None:
+    """~373x less compute per crop than CLIP, and served from the index."""
+    assert choose_route(query, CLASSES).engine == "classifier"
 
 
-def test_low_detector_confidence_is_dropped(config) -> None:
-    kept = select_crops([_candidate(conf=0.1)], config, (1000, 1000))
-    assert kept == []
+@pytest.mark.parametrize("query", ["quokka", "fennec fox", "axolotl"])
+def test_out_of_vocabulary_queries_fall_back_to_clip(query: str) -> None:
+    """No supervised ImageNet model can ever return these — CLIP is the only option."""
+    assert choose_route(query, CLASSES).engine == "clip"
 
 
-def test_padding_is_applied_and_clamped(config) -> None:
-    kept = select_crops([_candidate(box=(5, 5, 105, 105))], config, (1000, 1000))
-    assert kept[0].box[0] == 0  # clamped, not negative
-    assert kept[0].box[2] > 105  # padded
+def test_route_explains_itself() -> None:
+    assert "no inference" in choose_route("zebra", CLASSES).explain()
+    assert "CLIP" in choose_route("quokka", CLASSES).explain()
 
 
-# ---- ranking ----------------------------------------------------------
+def test_elephant_routes_to_elephants_not_insects() -> None:
+    """The original sent 'African elephant' to the Insect bucket via 'ant'."""
+    route = choose_route("elephant", CLASSES)
+    names = {CLASSES[i] for i in route.resolution.class_ids}
+    assert "African elephant" in names and "ant" not in names
 
 
-def test_query_is_the_first_prompt(config) -> None:
-    scorer = FakeScorer([[10.0, 0.0, 0.0]])
-    rank("zebra", [_candidate()], [object()], scorer, config)
-    assert scorer.seen_prompts[0] == "a photo of a zebra"
-    assert len(scorer.seen_prompts) > 1, "a rival prompt is required"
+# ── path 1: served from the index, no model runs ───────────────────────
 
 
-def test_confident_match_is_returned(config) -> None:
-    scorer = FakeScorer([[10.0, 0.0, 0.0]])
-    results = rank("zebra", [_candidate()], [object()], scorer, config)
+def test_indexed_query_returns_matching_class() -> None:
+    zebra = CLASSES.index("zebra")
+    results = rank_from_index(
+        choose_route("zebra", CLASSES).resolution,
+        [_prediction(class_id=zebra, prob=0.88)],
+        _config(),
+        CLASSES,
+    )
     assert len(results) == 1
-    assert results[0].score > config.animal.match_threshold
+    assert results[0].label == "zebra"
 
 
-def test_query_losing_to_a_rival_is_rejected(config) -> None:
-    """P1-3: the original had no confidence floor and shipped 21.5% as a match."""
-    scorer = FakeScorer([[0.0, 10.0, 0.0]])
-    assert rank("zebra", [_candidate()], [object()], scorer, config) == []
+def test_indexed_query_ignores_other_species() -> None:
+    lion = CLASSES.index("lion")
+    results = rank_from_index(
+        choose_route("zebra", CLASSES).resolution,
+        [_prediction(class_id=lion, prob=0.99)],
+        _config(),
+        CLASSES,
+    )
+    assert results == []
 
 
-def test_ambiguous_match_is_rejected_at_the_default_threshold(config) -> None:
-    scorer = FakeScorer([[5.0, 5.0, 5.0]])  # ~0.33 posterior
-    assert rank("zebra", [_candidate()], [object()], scorer, config) == []
+def test_low_probability_prediction_is_rejected(config) -> None:
+    """The original accepted a 21.5% top-1 over 1000 classes as a match."""
+    zebra = CLASSES.index("zebra")
+    below = config.animal.classifier_threshold - 0.05
+    results = rank_from_index(
+        choose_route("zebra", CLASSES).resolution,
+        [_prediction(class_id=zebra, prob=below)],
+        config,
+        CLASSES,
+    )
+    assert results == []
 
 
-def test_open_vocabulary_query_is_not_restricted_to_a_class_list(config) -> None:
-    """P1-1: 'red panda' is not an ImageNet-1k class and was unreachable before."""
-    scorer = FakeScorer([[12.0, 0.0, 0.0]])
-    results = rank("red panda", [_candidate()], [object()], scorer, config)
-    assert results and results[0].label == "red panda"
+def test_generic_query_matches_any_breed(config) -> None:
+    retriever = CLASSES.index("golden retriever")
+    results = rank_from_index(
+        choose_route("dog", CLASSES).resolution,
+        [_prediction(class_id=retriever, prob=0.8)],
+        config,
+        CLASSES,
+    )
+    assert len(results) == 1
 
 
-def test_no_keyword_map_means_no_substring_collisions(config) -> None:
-    """P1-5: searching 'animal' used to match the category 'object / non-animal'."""
-    scorer = FakeScorer([[0.0, 8.0, 0.0]])
-    assert rank("animal", [_candidate()], [object()], scorer, config) == []
-
-
-def test_one_image_with_two_animals_returns_one_result(config) -> None:
-    """P1-6: the strongest instance wins; the image is not listed twice."""
-    scorer = FakeScorer([[6.0, 0.0, 0.0], [14.0, 0.0, 0.0]])
-    candidates = [_candidate(box=(0, 0, 100, 100)), _candidate(box=(200, 200, 300, 300))]
-    results = rank("cat", candidates, [object(), object()], scorer, config)
+def test_one_image_with_two_animals_returns_once(config) -> None:
+    zebra = CLASSES.index("zebra")
+    results = rank_from_index(
+        choose_route("zebra", CLASSES).resolution,
+        [
+            _prediction(class_id=zebra, prob=0.40, box=(0, 0, 100, 100)),
+            _prediction(class_id=zebra, prob=0.95, box=(200, 200, 300, 300)),
+        ],
+        config,
+        CLASSES,
+    )
     assert len(results) == 1
     assert results[0].box == (200, 200, 300, 300), "kept the weaker instance"
 
 
-def test_results_are_ranked_across_images(config) -> None:
-    scorer = FakeScorer([[6.0, 0.0, 0.0], [14.0, 0.0, 0.0]])
-    candidates = [_candidate("weak.jpg"), _candidate("strong.jpg")]
-    results = rank("cat", candidates, [object(), object()], scorer, config)
-    assert [m.file_name for m in results] == ["strong.jpg", "weak.jpg"]
+def test_index_path_refuses_an_unresolved_query(config) -> None:
+    with pytest.raises(ValueError, match="vocabulary"):
+        rank_from_index(choose_route("quokka", CLASSES).resolution, [], config, CLASSES)
 
 
-def test_empty_candidate_list(config) -> None:
-    assert rank("cat", [], [], FakeScorer([]), config) == []
+# ── path 2: CLIP fallback ──────────────────────────────────────────────
 
 
-def test_empty_query_is_rejected(config) -> None:
+def test_clip_query_is_the_first_prompt(config) -> None:
+    scorer = FakeScorer([[10.0, 0.0, 0.0]])
+    rank_with_clip("quokka", [_candidate()], [object()], scorer, config)
+    assert scorer.seen_prompts[0] == "a photo of a quokka"
+    assert len(scorer.seen_prompts) > 1, "a rival prompt is required"
+
+
+def test_clip_confident_match_is_returned(config) -> None:
+    results = rank_with_clip(
+        "quokka", [_candidate()], [object()], FakeScorer([[12.0, 0.0, 0.0]]), config
+    )
+    assert len(results) == 1 and results[0].label == "quokka"
+
+
+def test_clip_query_losing_to_a_rival_is_rejected(config) -> None:
+    assert rank_with_clip(
+        "quokka", [_candidate()], [object()], FakeScorer([[0.0, 12.0, 0.0]]), config
+    ) == []
+
+
+def test_clip_ambiguous_match_is_rejected(config) -> None:
+    assert rank_with_clip(
+        "quokka", [_candidate()], [object()], FakeScorer([[5.0, 5.0, 5.0]]), config
+    ) == []
+
+
+def test_clip_empty_query_is_rejected(config) -> None:
     with pytest.raises(ValueError, match="empty query"):
-        rank("   ", [_candidate()], [object()], FakeScorer([[1.0, 0.0]]), config)
+        rank_with_clip("  ", [_candidate()], [object()], FakeScorer([[1.0, 0.0]]), config)
 
 
-def test_mismatched_lengths_are_rejected(config) -> None:
+def test_clip_mismatched_lengths_are_rejected(config) -> None:
     with pytest.raises(ValueError, match="candidates"):
-        rank("cat", [_candidate()], [object(), object()], FakeScorer([]), config)
+        rank_with_clip("quokka", [_candidate()], [object(), object()], FakeScorer([]), config)
+
+
+# ── crop selection, shared by both paths ───────────────────────────────
+
+
+def test_small_crops_are_dropped_before_recognition(config) -> None:
+    assert select_crops([_candidate(box=(0, 0, 12, 9))], config, (1000, 1000)) == []
+
+
+def test_low_detector_confidence_is_dropped(config) -> None:
+    assert select_crops([_candidate(conf=0.1)], config, (1000, 1000)) == []
+
+
+def test_padding_is_applied_and_clamped(config) -> None:
+    kept = select_crops([_candidate(box=(5, 5, 105, 105))], config, (1000, 1000))
+    assert kept[0].box[0] == 0      # clamped, not negative
+    assert kept[0].box[2] > 105     # padded
+
+
+@pytest.fixture()
+def _cfg(config):
+    return config
+
+
+def _config():
+    from vie.config import Config
+
+    return Config.load()

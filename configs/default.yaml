@@ -48,8 +48,15 @@ animal:
   padding_ratio: 0.15
   min_crop_px: 40
 
-  # Zero-shot recognition via CLIP. Replaces the ImageNet-1k classifier and its
-  # hand-written keyword map entirely.
+  # Recognition is a hybrid. The supervised classifier is the primary path
+  # because it costs ~373x less compute per crop than CLIP (0.217 vs ~81
+  # GFLOPs) for comparable ImageNet accuracy; CLIP is the fallback for species
+  # its vocabulary cannot express.
+  classifier: mobilenet_v3_large     # 74.0% top-1, 5.5M params
+  classifier_top_k: 5                # predictions stored per crop at index time
+  classifier_threshold: 0.25         # minimum softmax probability to accept
+
+  # CLIP fallback: posterior against the rival prompts below.
   match_threshold: 0.55
   negative_prompts:
     - "a photo of a different kind of animal"
