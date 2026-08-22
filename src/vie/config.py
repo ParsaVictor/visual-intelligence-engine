@@ -36,6 +36,8 @@ class ConfigError(ValueError):
 @dataclass(frozen=True)
 class FaceConfig:
     match_threshold: float
+    min_det_score: float
+    min_face_px: int
     det_size_large: int
     det_size_small: int
     small_image_px: int
@@ -78,9 +80,17 @@ class FoodConfig:
     match_threshold: float
     negative_prompts: list[str]
     face_overlap_reject: float
+    clip_gate_enabled: bool
+    clip_gate_threshold: float
+    clip_gate_positive: list[str]
+    clip_gate_negative: list[str]
 
     def prompts_for(self, query: str) -> list[str]:
         return [query, *self.negative_prompts]
+
+    def gate_prompts(self) -> list[str]:
+        """Positive prompts first, then negatives, for the zero-cost gate."""
+        return [*self.clip_gate_positive, *self.clip_gate_negative]
 
 
 @dataclass(frozen=True)
@@ -93,6 +103,9 @@ class Config:
     device: str
     half_precision: bool
     top_k: int
+    multi_crop: bool
+    crop_layout: str
+    score_mode: str
     gallery_path: Path
     database_path: Path
     models: dict[str, str]
@@ -121,6 +134,9 @@ class Config:
             device=str(raw["runtime"]["device"]),
             half_precision=bool(raw["runtime"]["half_precision"]),
             top_k=int(raw["text"]["top_k"]),
+            multi_crop=bool(raw["text"].get("multi_crop", False)),
+            crop_layout=str(raw["text"].get("crop_layout", "1")),
+            score_mode=str(raw["models"].get("score_mode", "softmax")),
             gallery_path=Path(raw["paths"]["gallery"]),
             database_path=Path(raw["paths"]["database"]),
             models=dict(raw["models"]),
@@ -172,6 +188,28 @@ class Config:
                             "hypothesis the softmax degenerates to always-1.0")
         if not self.food.negative_prompts:
             problems.append("food.negative_prompts must not be empty")
+
+        # SigLIP and CLIP are trained with different objectives: SigLIP uses an
+        # independent sigmoid per pair, CLIP a softmax over the batch. Scoring
+        # one with the other's rule silently miscalibrates every threshold.
+        if self.score_mode not in {"softmax", "sigmoid"}:
+            problems.append(
+                f"models.score_mode must be 'softmax' (CLIP) or 'sigmoid' (SigLIP), "
+                f"got {self.score_mode!r}"
+            )
+        model = self.models.get("vision_language", "")
+        if "siglip" in model.lower() and self.score_mode != "sigmoid":
+            problems.append(
+                f"{model} is a SigLIP model but score_mode is {self.score_mode!r}; "
+                f"SigLIP logits carry a learned bias and are meant for sigmoid"
+            )
+        if "clip-vit" in model.lower() and self.score_mode != "softmax":
+            problems.append(
+                f"{model} is a CLIP model but score_mode is {self.score_mode!r}"
+            )
+
+        if self.food.clip_gate_enabled and not self.food.clip_gate_positive:
+            problems.append("food.clip_gate_positive must not be empty when the gate is on")
 
         if problems:
             raise ConfigError("invalid configuration:\n  - " + "\n  - ".join(problems))

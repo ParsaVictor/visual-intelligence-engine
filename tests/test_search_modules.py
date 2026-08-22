@@ -84,22 +84,56 @@ def test_detection_size_scales_with_the_image(config) -> None:
 def test_text_search_ranks_by_similarity(config) -> None:
     query = _unit([1.0, 0.0])
     indexed = [
-        ("far.jpg", _unit([0.0, 1.0]), "/g/far.jpg"),
-        ("near.jpg", _unit([1.0, 0.1]), "/g/near.jpg"),
+        ("far.jpg", _unit([0.0, 1.0]), "/g/far.jpg", "whole"),
+        ("near.jpg", _unit([1.0, 0.1]), "/g/near.jpg", "whole"),
     ]
     assert [m.file_name for m in text.rank(query, indexed, config)] == ["near.jpg", "far.jpg"]
 
 
 def test_text_search_respects_top_k(config) -> None:
     query = _unit([1.0, 0.0])
-    indexed = [(f"{i}.jpg", _unit([1.0, i / 10]), f"/g/{i}.jpg") for i in range(10)]
+    indexed = [(f"{i}.jpg", _unit([1.0, i / 10]), f"/g/{i}.jpg", "whole") for i in range(10)]
     assert len(text.rank(query, indexed, config, top_k=3)) == 3
 
 
 def test_text_search_returns_everything_when_gallery_is_small(config) -> None:
     query = _unit([1.0, 0.0])
-    indexed = [("a.jpg", _unit([1.0, 0.0]), "/g/a.jpg")]
+    indexed = [("a.jpg", _unit([1.0, 0.0]), "/g/a.jpg", "whole")]
     assert len(text.rank(query, indexed, config, top_k=50)) == 1
+
+
+def test_image_scores_as_its_best_region(config) -> None:
+    """A subject filling one quadrant should beat a whole-image average.
+
+    This is the multi-crop payoff: the original returned 23% for its best hit
+    because a small subject barely moves the whole-image vector.
+    """
+    query = _unit([1.0, 0.0])
+    indexed = [
+        ("photo.jpg", _unit([0.30, 0.95]), "/g/photo.jpg", "whole"),   # diluted
+        ("photo.jpg", _unit([0.99, 0.10]), "/g/photo.jpg", "tr"),      # the subject
+    ]
+    results = text.rank(query, indexed, config)
+    assert len(results) == 1, "one result per image, not one per region"
+    assert results[0].label == "tr", "should report which region matched"
+    assert results[0].score > 0.9
+
+
+def test_multi_crop_does_not_duplicate_images(config) -> None:
+    query = _unit([1.0, 0.0])
+    indexed = [("a.jpg", _unit([1.0, 0.0]), "/g/a.jpg", r)
+               for r in ("whole", "tl", "tr", "bl", "br", "center")]
+    assert len(text.rank(query, indexed, config)) == 1
+
+
+def test_a_strong_crop_can_outrank_a_strong_whole_image(config) -> None:
+    query = _unit([1.0, 0.0])
+    indexed = [
+        ("scene.jpg", _unit([0.80, 0.60]), "/g/scene.jpg", "whole"),
+        ("detail.jpg", _unit([0.40, 0.92]), "/g/detail.jpg", "whole"),
+        ("detail.jpg", _unit([0.97, 0.24]), "/g/detail.jpg", "bl"),
+    ]
+    assert text.rank(query, indexed, config)[0].file_name == "detail.jpg"
 
 
 def test_relative_confidence_sums_to_one() -> None:

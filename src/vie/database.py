@@ -38,7 +38,13 @@ CREATE TABLE IF NOT EXISTS gallery_meta (
     file_size    INTEGER NOT NULL,
     has_face     INTEGER NOT NULL DEFAULT 0,
     has_animal   INTEGER NOT NULL DEFAULT 0,
-    has_food     INTEGER NOT NULL DEFAULT 0
+    has_food     INTEGER NOT NULL DEFAULT 0,
+    -- The two food gates are stored separately so their disagreement is
+    -- visible: the detector covers COCO's ten Western food classes, the
+    -- vision-language score covers everything else at no extra inference.
+    food_by_detector INTEGER NOT NULL DEFAULT 0,
+    food_by_vlm      INTEGER NOT NULL DEFAULT 0,
+    food_vlm_score   REAL    NOT NULL DEFAULT 0.0
 );
 
 -- (file_name, bbox) is the natural key: one row per detected face. Without it
@@ -51,9 +57,14 @@ CREATE TABLE IF NOT EXISTS face_embeddings (
     FOREIGN KEY (file_name) REFERENCES gallery_meta (file_name) ON DELETE CASCADE
 );
 
+-- One row per encoded region. 'whole' is the full frame; the rest are crops.
+-- A single whole-image vector averages the scene, so a small subject is
+-- diluted away -- encoding regions lets a query match the best one.
 CREATE TABLE IF NOT EXISTS clip_embeddings (
-    file_name TEXT PRIMARY KEY,
+    file_name TEXT NOT NULL,
+    region    TEXT NOT NULL DEFAULT 'whole',
     embedding BLOB NOT NULL,
+    PRIMARY KEY (file_name, region),
     FOREIGN KEY (file_name) REFERENCES gallery_meta (file_name) ON DELETE CASCADE
 );
 
@@ -150,10 +161,14 @@ class Index:
             (file_name, ",".join(map(str, box)), to_blob(embedding)),
         )
 
-    def add_clip(self, conn: sqlite3.Connection, file_name: str, embedding: np.ndarray) -> None:
+    def add_clip(
+        self, conn: sqlite3.Connection, file_name: str, embedding: np.ndarray,
+        region: str = "whole",
+    ) -> None:
         conn.execute(
-            "INSERT OR REPLACE INTO clip_embeddings (file_name, embedding) VALUES (?, ?)",
-            (file_name, to_blob(embedding)),
+            "INSERT OR REPLACE INTO clip_embeddings (file_name, region, embedding) "
+            "VALUES (?, ?, ?)",
+            (file_name, region, to_blob(embedding)),
         )
 
     def add_animal_box(
@@ -195,10 +210,15 @@ class Index:
             yield file_name, box, from_blob(blob), file_path
 
     def iter_clip(self, conn: sqlite3.Connection):
-        query = """SELECT c.file_name, c.embedding, g.file_path
+        """Yield every stored region vector.
+
+        Callers collapse regions per image by taking the best-scoring one, so
+        an image with a small subject can still win on its crop.
+        """
+        query = """SELECT c.file_name, c.embedding, g.file_path, c.region
                    FROM clip_embeddings c JOIN gallery_meta g USING (file_name)"""
-        for file_name, blob, file_path in conn.execute(query):
-            yield file_name, from_blob(blob), file_path
+        for file_name, blob, file_path, region in conn.execute(query):
+            yield file_name, from_blob(blob), file_path, region
 
     def prune_missing(self, conn: sqlite3.Connection, present: set[str]) -> int:
         """Remove rows for files that no longer exist on disk."""

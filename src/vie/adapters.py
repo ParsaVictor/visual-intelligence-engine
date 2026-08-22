@@ -18,21 +18,34 @@ from vie.config import Config
 from vie.geometry import Box
 from vie.logging_setup import get_logger
 from vie.models import ModelBundle
+from vie.quality import is_usable_face
 
 log = get_logger("adapters")
 
 
 class InsightFaceDetector:
-    """InsightFace ``buffalo_l``: RetinaFace detection + ArcFace embeddings."""
+    """InsightFace ``buffalo_l``: RetinaFace detection + ArcFace embeddings.
 
-    def __init__(self, bundle: ModelBundle) -> None:
+    Applies a deliberately permissive quality gate. Anything RetinaFace is even
+    moderately confident about gets indexed — the gate exists only to drop
+    detections too degraded to carry identity, because such an embedding does
+    not merely fail to match, it matches the *wrong person*.
+    """
+
+    def __init__(self, bundle: ModelBundle, config: Config) -> None:
         self.app = bundle.face_app
+        self.config = config
+        self.rejected = 0
 
     def detect(self, image: Any) -> list[tuple[Box, Any]]:
-        faces = self.app.get(image)
         out: list[tuple[Box, Any]] = []
-        for face in faces:
+        for face in self.app.get(image):
             box = tuple(int(v) for v in face.bbox[:4])
+            score = float(getattr(face, "det_score", 1.0))
+            if not is_usable_face(score, box, self.config.face.min_det_score,
+                                  self.config.face.min_face_px):
+                self.rejected += 1
+                continue
             # normed_embedding is unit length, which is what makes a dot
             # product equal cosine similarity downstream.
             out.append((box, face.normed_embedding))
@@ -135,7 +148,7 @@ class Detectors:
 
 def build_detectors(bundle: ModelBundle, config: Config) -> Detectors:
     return Detectors(
-        face=InsightFaceDetector(bundle),
+        face=InsightFaceDetector(bundle, config),
         animal=MegaDetectorAdapter(bundle),
         food=RTDetrAdapter(bundle),
     )

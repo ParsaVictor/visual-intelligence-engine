@@ -18,7 +18,14 @@ runtime:
   half_precision: true  # applies to CLIP only; see docs/design-decisions.md
 
 models:
-  clip: openai/clip-vit-large-patch14
+  # SigLIP replaces CLIP: better zero-shot at half the parameters.
+  # base-patch16-224 = 203M params, ~76.2% ImageNet 0-shot (published)
+  # CLIP ViT-L/14    = 428M params, ~75.5%
+  # Swap to google/siglip-so400m-patch14-384 for ~83.2% at 877M params.
+  vision_language: google/siglip-base-patch16-224
+  # "sigmoid" for SigLIP, "softmax" for CLIP -- they are trained with
+  # different objectives and their logits are not interchangeable.
+  score_mode: sigmoid
   face_pack: buffalo_l
   animal_detector: md_v5a.0.0.pt
   object_detector: rtdetr-x.pt
@@ -26,6 +33,13 @@ models:
 face:
   # ArcFace embeddings are L2-normalised, so a dot product is cosine similarity.
   match_threshold: 0.46
+
+  # Quality gate at index time. Deliberately permissive: the goal is only to
+  # drop detections too degraded to embed meaningfully, not to be selective.
+  # A garbage embedding is worse than no embedding, because at threshold 0.46
+  # it generates false matches rather than simply being absent.
+  min_det_score: 0.30
+  min_face_px: 24
   det_size_large: 640
   det_size_small: 320
   small_image_px: 400
@@ -52,7 +66,14 @@ animal:
   # because it costs ~373x less compute per crop than CLIP (0.217 vs ~81
   # GFLOPs) for comparable ImageNet accuracy; CLIP is the fallback for species
   # its vocabulary cannot express.
-  classifier: mobilenet_v3_large     # 74.0% top-1, 5.5M params
+  # Same 1000 ImageNet classes as before -- identical species coverage.
+  # Only the accuracy changes. Affordable because this now runs once per
+  # image at index time, not per query.
+  #   mobilenet_v3_large  74.0%  0.22 GFLOPs
+  #   efficientnet_b0     77.7%  0.39
+  #   convnext_tiny       82.5%  4.46   <-- chosen
+  #   efficientnet_v2_s   84.2%  8.37
+  classifier: convnext_tiny
   classifier_top_k: 5                # predictions stored per crop at index time
   classifier_threshold: 0.25         # minimum softmax probability to accept
 
@@ -79,8 +100,35 @@ food:
     - "a photo of a completely different food"
     - "a photo of an empty plate or background"
 
+  # Second, independent gate. The whole-image embedding is already computed
+  # and stored for text search, and the prompt embeddings are encoded once at
+  # startup -- so this costs zero extra image inference.
+  #
+  # It exists because COCO carries only ten food classes, all Western. A plate
+  # of kebab or ghormeh sabzi fires none of them, so a detector-only gate
+  # silently drops those photos from the index entirely.
+  clip_gate_enabled: true
+  clip_gate_threshold: 0.10
+  clip_gate_positive:
+    - "a photo of food"
+    - "a photo of a meal on a plate"
+    - "a photo of a dish of cooked food"
+  clip_gate_negative:
+    - "a photo with no food in it"
+    - "a photo of people, buildings or scenery"
+
   # Reject a food box that sits mostly on top of a detected face.
   face_overlap_reject: 0.50
 
 text:
   top_k: 5
+
+  # Multi-crop embeddings. One vector for the whole frame plus a 2x2 grid and
+  # a centre crop; a query scores against the best-matching region.
+  #
+  # A single whole-image embedding averages the scene, so a backpack occupying
+  # 3% of a wide press photo is diluted away -- which is why the original demo
+  # returned 23% for its best hit. Costs 6x the index-time image encoding and
+  # 6x the embedding storage; query time is unchanged.
+  multi_crop: true
+  crop_layout: "1+2x2+center"
