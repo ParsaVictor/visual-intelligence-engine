@@ -104,6 +104,11 @@ def load_all(config: Config) -> ModelBundle:
     this project is in how these are combined and indexed, not in training.
     """
     import torch  # noqa: F401 - imported for its side effect of initialising CUDA
+
+    from vie.cache import configure_cache
+    cache = configure_cache(config.model_cache)
+    if cache:
+        log.info("model cache: %s", cache)
     from insightface.app import FaceAnalysis
     from transformers import AutoModel, AutoProcessor
     from ultralytics import RTDETR

@@ -12,6 +12,8 @@ project:
 paths:
   gallery: data/gallery
   database: data/index.db
+  # مدل‌ها یک بار دانلود و اینجا کش می‌شوند (مثلا روی Google Drive).
+  model_cache: ""   # خالی = کش پیش‌فرض HuggingFace
 
 runtime:
   device: auto          # auto | cuda | cpu
@@ -22,7 +24,7 @@ models:
   # base-patch16-224 = 203M params, ~76.2% ImageNet 0-shot (published)
   # CLIP ViT-L/14    = 428M params, ~75.5%
   # Swap to google/siglip-so400m-patch14-384 for ~83.2% at 877M params.
-  vision_language: google/siglip-base-patch16-224
+  vision_language: google/siglip-so400m-patch14-384
   # "sigmoid" for SigLIP, "softmax" for CLIP -- they are trained with
   # different objectives and their logits are not interchangeable.
   score_mode: sigmoid

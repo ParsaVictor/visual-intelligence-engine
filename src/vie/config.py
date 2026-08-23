@@ -108,6 +108,7 @@ class Config:
     score_mode: str
     gallery_path: Path
     database_path: Path
+    model_cache: str
     models: dict[str, str]
 
     # ---- construction -------------------------------------------------
@@ -139,6 +140,7 @@ class Config:
             score_mode=str(raw["models"].get("score_mode", "softmax")),
             gallery_path=Path(raw["paths"]["gallery"]),
             database_path=Path(raw["paths"]["database"]),
+            model_cache=str(raw["paths"].get("model_cache", "") or ""),
             models=dict(raw["models"]),
         )
 
