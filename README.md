@@ -45,38 +45,7 @@ Faces, animals, food, plain-English descriptions, and moments inside a video, al
 
 ## Architecture
 
-Heavy models run **once**, when a file is indexed. A search then narrows the candidates with plain SQL and does expensive work only on what is left.
-
-```mermaid
-flowchart LR
-    subgraph IN["Your files"]
-        P["Photos"]
-        V["Videos"]
-    end
-
-    subgraph AN["Analysis, once per file"]
-        S["Shots and keyframes"]
-        F["Faces<br/>InsightFace"]
-        A["Animals<br/>MegaDetector + ConvNeXt"]
-        D["Food<br/>RT-DETR + food gate"]
-        E["Image vectors<br/>SigLIP"]
-        W["Speech<br/>Whisper"]
-    end
-
-    DB[("SQLite index")]
-
-    subgraph OUT["Search, in milliseconds to seconds"]
-        Q["SQL prefilter"]
-        R["Vector search or<br/>stored predictions"]
-        H["Ranked results<br/>and HTML reports"]
-    end
-
-    P --> F & A & D & E
-    V --> S --> F & A & D & E
-    V --> W
-    F & A & D & E & W --> DB
-    DB --> Q --> R --> H
-```
+![Files flow through analysis into a SQLite index, which search then filters and compares](assets/diagrams/architecture.png)
 
 Three decisions carry most of the design:
 
@@ -88,13 +57,7 @@ More in [the architecture](docs/architecture.md), [the design decisions](docs/de
 
 ## How the project got here
 
-```mermaid
-flowchart LR
-    A["<b>v0.0.1</b><br/>Colab notebooks<br/>and a roadmap"] --> B["<b>v0.1.0</b><br/>Installable package<br/>CLI, config, tests"]
-    B --> C["<b>v0.2.0</b><br/>SigLIP and<br/>hybrid species search"]
-    C --> D["<b>v0.3.0</b><br/>Full audit, everything<br/>connected and measured"]
-    D --> E["<b>v0.4.0</b><br/>Video<br/>understanding"]
-```
+![Five versions: notebooks, package, SigLIP, audit, video](assets/diagrams/journey.png)
 
 | Step | What changed |
 |:--|:--|
