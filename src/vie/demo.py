@@ -1,4 +1,4 @@
-"""Gradio demo: every search path.
+"""Gradio demo: every search path, plus video understanding.
 
     python -m vie.demo
 
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -41,9 +42,9 @@ button.primary { font-weight: 600 !important; }
 HEADER = f"""
 <div id="vie-head">
   <p class="eyebrow">Visual Intelligence Engine {__version__}</p>
-  <h1>Search images by what is in them.</h1>
-  <p>Faces, species, dishes and free text.</p>
-  <p dir="rtl">جستجو در عکس‌ها بر اساس محتوای آن‌ها.</p>
+  <h1>Search images and video by what is in them.</h1>
+  <p>Faces, species, dishes, free text, and moments inside a video.</p>
+  <p dir="rtl">جستجو در عکس و ویدیو بر اساس محتوای آن‌ها.</p>
 </div>
 """
 
@@ -114,6 +115,33 @@ def build_app(config: Config) -> Any:
         noun = "image" if len(matches) == 1 else "images"
         return gallery_items(matches), f"{len(matches)} {noun}, best first."
 
+    def analyse_video(path: str | None, labels_only: bool, transcribe: bool, progress=None):
+        from vie.report.video import render_video_report
+        from vie.video.decode import VideoDecodeError
+        from vie.video.library import Stages, build_engine
+
+        if not path:
+            return "", "Upload a video first.", None
+        bundle, _, encoder = runtime(config)
+        base = Stages.from_config(config)
+        stages = Stages(
+            faces=base.faces and not labels_only,
+            animals=base.animals and not labels_only,
+            food=base.food and not labels_only,
+            captions=base.captions,
+            transcript=base.transcript or transcribe,
+        )
+        try:
+            analysis = build_engine(config, bundle, encoder, stages).analyse(path)
+        except (FileNotFoundError, VideoDecodeError) as exc:
+            return "", f"{exc}", None
+        page = render_video_report(analysis)
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".html", delete=False, encoding="utf-8"
+        ) as handle:
+            handle.write(page)
+        return analysis.summary["en"], analysis.summary["fa"], handle.name
+
     # Analytics off: this interface shows photographs of identifiable people.
     with gr.Blocks(analytics_enabled=False, **_styling_kwargs(gr.Blocks, gr)) as app:
         gr.HTML(HEADER)
@@ -133,6 +161,24 @@ def build_app(config: Config) -> Any:
             _text_tab(gr, search, "animal", "red panda")
         with gr.Tab("Food"):
             _text_tab(gr, search, "food", "ghormeh sabzi")
+        with gr.Tab("Video"):
+            with gr.Row():
+                with gr.Column(scale=2):
+                    video_in = gr.Video(label="Video", sources=["upload"])
+                    labels_only = gr.Checkbox(
+                        label="Labels only (fast, works on a laptop CPU)", value=False
+                    )
+                    transcribe = gr.Checkbox(label="Transcribe the speech", value=False)
+                    video_btn = gr.Button("Understand this video", variant="primary")
+                with gr.Column(scale=3):
+                    summary_en = gr.Textbox(label="Summary", lines=5, interactive=False)
+                    summary_fa = gr.Textbox(label="خلاصه", lines=5, interactive=False, rtl=True)
+                    report = gr.File(label="Full visual report (HTML)")
+            video_btn.click(
+                analyse_video, [video_in, labels_only, transcribe],
+                [summary_en, summary_fa, report],
+            )
+
     return app
 
 
@@ -169,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
     app = build_app(config)
     # Gradio refuses to serve files outside the working directory unless told to,
     # which broke every result as soon as the gallery lived anywhere else.
-    allowed = [str(Path(config.gallery_path).resolve())]
+    allowed = [str(Path(config.gallery_path).resolve()), str(Path(config.videos_path).resolve())]
     launch_args: dict[str, Any] = {
         "server_port": args.port,
         "share": args.share,

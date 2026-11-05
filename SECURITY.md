@@ -14,6 +14,7 @@ the photographs themselves.
 | `*.db` / `*.sqlite` | contains face embeddings — biometric identifiers |
 | `*.pkl`, `*.npy` | cached embeddings |
 | model weights | large, and redistributable only under their own licences |
+| footage (`*.mp4`, `*.mov`...) | moving images of identifiable people |
 | generated reports (`--html`) | embed thumbnails, faces included |
 
 `.gitignore` blocks all of these. Verify with `git status` after any pipeline

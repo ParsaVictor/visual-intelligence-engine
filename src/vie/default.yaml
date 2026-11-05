@@ -11,6 +11,7 @@ project:
 
 paths:
   gallery: data/gallery
+  videos: data/videos
   database: data/index.db
   # مدل‌ها یک بار دانلود و اینجا کش می‌شوند (مثلا روی Google Drive).
   model_cache: ""   # خالی = کش پیش‌فرض HuggingFace
@@ -161,3 +162,93 @@ text:
   # 6x the embedding storage; query time is unchanged.
   multi_crop: true
   crop_layout: "1+2x2+center"
+
+video:
+  # First pass: one frame per this many seconds, stretched on very long videos so
+  # the pass never exceeds max_samples.
+  sample_seconds: 1.0
+  max_samples: 3600
+  max_duration: 0          # analyse only this many seconds; 0 = the whole file
+
+  # Second pass: full-resolution frames the models actually see.
+  max_side: 960
+  keyframe_seconds: 6.0    # roughly one keyframe per this much of a shot...
+  keyframes_per_shot: 3    # ...up to this many...
+  max_keyframes: 240       # ...within this budget per video.
+
+  shots:
+    hard_cut: 0.35         # Hellinger distance between neighbouring samples
+    adaptive_k: 4.0        # raises the bar during busy scenes
+    adaptive_window: 12
+    drift: 0.55            # gradual change: a dissolve, or a pan somewhere new
+    min_shot_seconds: 1.0
+
+  # Stages. Faces, animals and food need their heavier models and can be turned
+  # off, per run, with --no-faces, --no-animals and --no-food.
+  faces: true
+  animals: true
+  food: true
+  captions: false          # optional: needs only transformers
+  transcript: false        # optional: pip install faster-whisper
+
+  caption_model: Salesforce/blip-image-captioning-base
+  whisper_model: small
+  whisper_device: auto     # auto | cpu | cuda
+
+  face_cluster_threshold: 0.45  # the same ArcFace scale as face.match_threshold
+  min_face_sightings: 2         # one glimpse is more likely a false detection
+  presence_gap: 12.0            # seconds apart that still count as continuous
+
+  # What "what is this video about" can mean: zero-shot labels, so this is a list
+  # to edit, not a model to retrain. A label counts as present in a shot when it takes
+  # at least this share against the other labels of its group.
+  label_threshold: 0.40
+  prompt_template: "a video frame showing {label}"
+  taxonomy:
+    topic:
+      - a news broadcast
+      - a press conference
+      - a political speech
+      - a sports match
+      - a music performance
+      - a cooking show
+      - a wildlife documentary
+      - a nature documentary
+      - a lecture or classroom
+      - an interview
+      - a video game
+      - an animated cartoon
+      - a movie scene
+      - a travel vlog
+      - a product advertisement
+      - a street protest or crowd
+      - a wedding or ceremony
+      - a screen recording of software
+    setting:
+      - indoors in an office
+      - indoors in a home
+      - in a studio
+      - on a stage
+      - in a city street
+      - in a forest
+      - on a beach or by the sea
+      - in the mountains
+      - in a stadium
+      - in a kitchen
+      - in a restaurant
+      - in a classroom
+      - in a vehicle
+      - at night
+    activity:
+      - people talking
+      - people walking
+      - people running
+      - people dancing
+      - people singing or playing instruments
+      - people eating
+      - people cooking
+      - people playing a sport
+      - people fighting
+      - someone driving
+      - animals moving
+      - text and graphics on screen

@@ -27,6 +27,7 @@ from typing import Any
 import yaml
 
 from vie.vectorstore import SearchConfig
+from vie.video.shots import ShotConfig
 
 #: Ships inside the package. It used to live at the repository root, so anything
 #: but an editable install failed with "config not found" on the first command.
@@ -107,6 +108,39 @@ class IndexingConfig:
 
 
 @dataclass(frozen=True)
+class VideoConfig:
+    sample_seconds: float = 1.0
+    max_samples: int = 3600
+    max_duration: float = 0
+    max_side: int = 960
+    keyframe_seconds: float = 6.0
+    keyframes_per_shot: int = 3
+    max_keyframes: int = 240
+    shots: ShotConfig = field(default_factory=ShotConfig)
+    faces: bool = True
+    animals: bool = True
+    food: bool = True
+    captions: bool = False
+    transcript: bool = False
+    caption_model: str = "Salesforce/blip-image-captioning-base"
+    whisper_model: str = "small"
+    whisper_device: str = "auto"
+    face_cluster_threshold: float = 0.45
+    min_face_sightings: int = 2
+    presence_gap: float = 12.0
+    label_threshold: float = 0.40
+    prompt_template: str = "a video frame showing {label}"
+    taxonomy: dict[str, list[str]] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> VideoConfig:
+        values = dict(raw)
+        if "shots" in values:
+            values["shots"] = ShotConfig(**values["shots"])
+        return cls(**values)
+
+
+@dataclass(frozen=True)
 class Config:
     raw: dict[str, Any] = field(repr=False)
     face: FaceConfig
@@ -114,6 +148,7 @@ class Config:
     food: FoodConfig
     indexing: IndexingConfig
     search: SearchConfig
+    video: VideoConfig
     seed: int
     device: str
     half_precision: bool
@@ -123,6 +158,7 @@ class Config:
     crop_layout: str
     score_mode: str
     gallery_path: Path
+    videos_path: Path
     database_path: Path
     model_cache: str
     models: dict[str, str]
@@ -149,6 +185,7 @@ class Config:
             food=FoodConfig(**raw["food"]),
             indexing=IndexingConfig(**(raw.get("indexing") or {})),
             search=SearchConfig(**(raw.get("search") or {})),
+            video=VideoConfig.from_dict(raw.get("video") or {}),
             seed=int(raw["project"]["seed"]),
             device=str(raw["runtime"]["device"]),
             half_precision=bool(raw["runtime"]["half_precision"]),
@@ -158,6 +195,7 @@ class Config:
             crop_layout=str(raw["text"].get("crop_layout", "1")),
             score_mode=str(raw["models"].get("score_mode", "softmax")),
             gallery_path=Path(raw["paths"]["gallery"]),
+            videos_path=Path(raw["paths"].get("videos", "data/videos")),
             database_path=Path(raw["paths"]["database"]),
             model_cache=str(raw["paths"].get("model_cache", "") or ""),
             models=dict(raw["models"]),
@@ -248,6 +286,24 @@ class Config:
             problems.append(
                 f"search.backend must be auto, exact or hnsw, got {self.search.backend!r}"
             )
+
+        video = self.video
+        if "{label}" not in video.prompt_template:
+            problems.append("video.prompt_template must contain {label}")
+        if video.sample_seconds <= 0 or video.keyframe_seconds <= 0:
+            problems.append("video.sample_seconds and video.keyframe_seconds must be positive")
+        if video.keyframes_per_shot < 1 or video.max_keyframes < 1 or video.max_samples < 1:
+            problems.append("video keyframe and sample budgets must be at least 1")
+        if not 0.0 <= video.label_threshold <= 1.0:
+            problems.append("video.label_threshold must be in [0, 1]")
+        for group, labels in video.taxonomy.items():
+            if len(labels) < 2:
+                problems.append(
+                    f"video.taxonomy.{group} needs at least two labels: they are scored "
+                    f"against each other, so a lone label would always win"
+                )
+        if video.whisper_device not in {"auto", "cpu", "cuda"}:
+            problems.append("video.whisper_device must be auto, cpu or cuda")
 
         if problems:
             raise ConfigError("invalid configuration:\n  - " + "\n  - ".join(problems))

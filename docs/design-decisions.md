@@ -43,6 +43,13 @@ The thresholds it replaced were carried over from CLIP. On the same pairs, with 
 so400m model, they gave 46% precision on food and 57% on species. The numbers now are in the
 README.
 
+### The same lesson for video labels
+
+SigLIP's absolute probability was about 0.001 for every video label on every frame, right
+or wrong, so it cannot be thresholded. A softmax *within each label group* correctly chose
+"a movie scene" for two films. The cost is that some label always wins, so a group has to
+be a sensible set of alternatives, and a label needs real coverage to reach a summary.
+
 ---
 
 ## CLIP instead of a classifier plus a keyword map
@@ -166,7 +173,17 @@ Every defect in this list passed a full green suite:
 - SigLIP tokenized with the wrong padding (no error, wrong vectors)
 - BGR sent to an RGB model (no error, wrong vectors)
 - thresholds on another model's scale (no error, 46% precision)
+- `faster-whisper` calling `av.open` with an option current PyAV removed
 
 `tests/test_integration.py` runs the real wiring with fake weights in seconds on every
 push. `.github/workflows/models.yml` runs real weights on real images and real footage.
 Both exist because the fast suite alone was not enough.
+
+---
+
+## Fail where it is cheap, keep what is expensive
+
+A video can take minutes to analyse, so an optional stage that fails produces a warning
+on the report rather than an exception that discards the result. This came from a real
+run, in which Whisper running out of memory threw away a finished analysis. The same idea
+is why indexing commits periodically and retries a failed batch image by image.

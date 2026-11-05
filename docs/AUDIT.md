@@ -2,7 +2,7 @@
 
 An audit of `main` at `61d88c5`, done on 2026-11-04. Findings were reproduced by
 running the code, not by reading it alone. Each one is now pinned by a test in
-`tests/test_integration.py`.
+`tests/test_integration.py` or `tests/test_video.py`.
 
 ## The headline
 
@@ -74,15 +74,8 @@ Worth saying plainly, because a list of defects makes it easy to miss:
 
 | Item | Why it is not done |
 |:--|:--|
-| **P0-3 ownership and licence** | A decision for the owner, not something code can settle. See below |
+| **P0-3 ownership and licence** | A decision for the owner, not something code can settle |
 | **Accuracy on a real archive** | The calibration set is 72 easy public images. It is good for choosing a rule and catching a wrong scale, not for promising accuracy |
 | **Face recognition quality** | The path runs on CI with real weights, but nothing here measures how well it identifies people, and the CI images contain no faces to search for |
 | **Docker image** | Rewritten, not built: this machine has no Docker |
 | **GPU** | Nothing has been run on a GPU in this audit, including half precision |
-
-### The repository is public, and its roadmap says it should not be
-
-`ROADMAP.md` says that until ownership is confirmed in writing "the repository stays
-private". GitHub reports the repository as **public**. It also carries screenshots
-of an identifiable real person in `assets/demo/`. This needs a deliberate decision by
-the owner. Nothing in this work changed the repository's visibility.

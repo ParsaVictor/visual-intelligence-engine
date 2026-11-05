@@ -45,10 +45,12 @@ models = [
 cpu = ["onnxruntime>=1.17"]
 gpu = ["onnxruntime-gpu>=1.17"]
 ann = ["faiss-cpu>=1.8"]
+video = ["av>=12", "opencv-python-headless>=4.8", "pillow>=10.0"]
+speech = ["faster-whisper>=1.0"]
 demo = ["gradio>=6.0"]
 # No torch: the end-to-end tests use real image files and real decoding, with only
 # the weights faked, so they still run in seconds on any machine.
-dev = ["pytest>=7.4", "ruff>=0.4", "opencv-python-headless>=4.8", "pillow>=10.0"]
+dev = ["pytest>=7.4", "ruff>=0.4", "opencv-python-headless>=4.8", "pillow>=10.0", "av>=12"]
 
 [project.scripts]
 vie = "vie.cli:main"

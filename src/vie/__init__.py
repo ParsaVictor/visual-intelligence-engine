@@ -1,6 +1,6 @@
 """Visual Intelligence Engine — multimodal search over an image archive."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from vie.config import Config, ConfigError
 from vie.scoring import Match, best_per_image, contrastive_score

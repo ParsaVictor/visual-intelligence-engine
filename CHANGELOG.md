@@ -2,6 +2,14 @@
 
 Each version is a git tag. Check one out to get that state of the project.
 
+## v0.4.0: video understanding
+
+New `vie.video` package and `vie video` commands: shot detection, keyframes, zero-shot
+labels per shot and per video, faces clustered into people with time intervals,
+animals and food on a timeline, optional speech and captions, a factual summary in
+English and Persian, a self-contained HTML report, and search across videos by text,
+speech or face. See [docs/video.md](docs/video.md).
+
 ## v0.3.0: the system does what it says
 
 The audit in [docs/AUDIT.md](docs/AUDIT.md) found that all tests passed while one of

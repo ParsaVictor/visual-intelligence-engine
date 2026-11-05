@@ -25,9 +25,10 @@ OPTIONAL_MODULES = (
     ("insightface", "face search"),
     ("onnxruntime", "face search"),
     ("ultralytics", "food detection"),
-    ("cv2", "image decoding"),
+    ("cv2", "image and video decoding"),
     ("faiss", "the ANN backend (exact search still works)"),
     ("gradio", "the interactive demo"),
+    ("faster_whisper", "video transcription"),
 )
 
 

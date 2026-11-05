@@ -126,16 +126,22 @@ Each task ID maps to one issue — 39 in total.
 
 ---
 
+## Phase 7: Video
+
+<!-- video-start -->
+✅ Delivered in v0.4: see [docs/video.md](docs/video.md), including what could come next.
+<!-- video-end -->
+
+---
+
 ## Where this stands
 
 [docs/AUDIT.md](docs/AUDIT.md) records what an audit of v0.2 found: phases 1 to 5 had been
 marked complete while several of those items were not connected to the running system.
 That has been fixed, and the honest state is:
 
-1. **P0-3, ownership and licence: open, and the owner's decision.** The original work was
-   produced in a client context. `LICENSE` stays unset until ownership is confirmed in
-   writing. This page said the repository would stay private until then, and GitHub
-   reports it as public, which needs a deliberate decision.
+1. **P0-3, ownership and licence: open, and the owner's decision.** `LICENSE` stays unset
+   until that is settled.
 2. **P4-4, benchmarks: partly done.** Search mechanics and scoring rules are measured and in
    the README. Accuracy on a real archive and anything on a GPU are not, because they need
    the real gallery and a GPU.

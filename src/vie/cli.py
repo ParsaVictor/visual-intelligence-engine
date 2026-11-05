@@ -5,6 +5,9 @@
     vie search animal --query "red panda"
     vie search food   --query "French fries"
     vie search text   --query "a man with a blue backpack" --html results.html
+    vie video analyze clip.mp4 --html report.html
+    vie video index
+    vie video search --query "a goal being scored"
     vie doctor
 
 The notebooks were bound to Colab through ``google.colab.files``, ``cv2_imshow``
@@ -82,7 +85,40 @@ def _build_parser() -> argparse.ArgumentParser:
         node.add_argument("--top-k", type=int, default=None)
         node.add_argument("--html", type=Path, default=None, help="write a visual report here")
 
+    _add_video_commands(sub, common)
     return parser
+
+
+def _add_video_commands(sub: argparse._SubParsersAction, common: argparse.ArgumentParser) -> None:
+    stages = argparse.ArgumentParser(add_help=False)
+    stages.add_argument("--no-faces", action="store_true", help="skip face detection")
+    stages.add_argument("--no-animals", action="store_true", help="skip animal detection")
+    stages.add_argument("--no-food", action="store_true", help="skip food detection")
+    stages.add_argument("--labels-only", action="store_true",
+                        help="only the vision-language model: runs on a laptop CPU")
+    stages.add_argument("--captions", action="store_true", help="add a caption per shot")
+    stages.add_argument("--transcribe", action="store_true", help="transcribe the speech")
+
+    video = sub.add_parser("video", help="understand and search videos", parents=[common])
+    actions = video.add_subparsers(dest="action", required=True)
+
+    analyze = actions.add_parser("analyze", help="describe one video",
+                                 parents=[common, stages])
+    analyze.add_argument("file", type=Path)
+    analyze.add_argument("--html", type=Path, default=None, help="write a visual report here")
+    analyze.add_argument("--max-duration", type=float, default=None,
+                         help="analyse only the first N seconds")
+
+    index = actions.add_parser("index", help="index the configured video folder",
+                               parents=[common, stages])
+    index.add_argument("--no-prune", action="store_true",
+                       help="keep rows for files no longer on disk")
+
+    search = actions.add_parser("search", help="find moments across indexed videos",
+                                parents=[common])
+    search.add_argument("--query", default=None, help="describe what you are looking for")
+    search.add_argument("--image", type=Path, default=None, help="find this person")
+    search.add_argument("--top-k", type=int, default=10)
 
 
 def match_to_dict(match: Match) -> dict:
@@ -184,6 +220,130 @@ def _run_search(args: argparse.Namespace, config: Config, as_json: bool) -> int:
     return 0 if matches else 1
 
 
+def _stages(args: argparse.Namespace, config: Config):
+    from vie.video.library import Stages
+
+    base = Stages.from_config(config)
+    only_labels = args.labels_only
+    return Stages(
+        faces=base.faces and not (args.no_faces or only_labels),
+        animals=base.animals and not (args.no_animals or only_labels),
+        food=base.food and not (args.no_food or only_labels),
+        captions=base.captions or args.captions,
+        transcript=base.transcript or args.transcribe,
+    )
+
+
+def _render_analysis(analysis, as_json: bool) -> None:
+    from vie.video.store import analysis_to_dict
+
+    if as_json:
+        print(json.dumps(analysis_to_dict(analysis), indent=2, ensure_ascii=False))
+        return
+
+    from rich.console import Console
+    from rich.table import Table
+
+    from vie.video.understand import format_clock
+
+    console = Console()
+    console.print(f"\n{analysis.summary['en']}\n")
+    table = Table(box=None, header_style="dim", pad_edge=False)
+    for column in ("group", "label", "of running time", "first seen"):
+        table.add_column(column)
+    for item in analysis.labels[:12]:
+        table.add_row(item.group, item.label, f"{item.coverage * 100:.0f}%",
+                      format_clock(item.intervals[0].start))
+    console.print(table)
+
+
+def _run_video(args: argparse.Namespace, config: Config, as_json: bool) -> int:
+    from dataclasses import replace
+
+    from vie.video.decode import VideoDecodeError
+    from vie.video.library import build_engine, index_videos
+
+    try:
+        if args.action == "search":
+            return _run_video_search(args, config, as_json)
+
+        if args.action == "analyze" and args.max_duration is not None:
+            config = replace(config, video=replace(config.video, max_duration=args.max_duration))
+        bundle, _, encoder = _load_runtime(config)
+        engine = build_engine(config, bundle, encoder, _stages(args, config))
+
+        if args.action == "index":
+            stats = index_videos(config, engine, prune=not args.no_prune)
+            print(stats.summary())
+            return 0 if stats.failed == 0 else 3
+
+        analysis = engine.analyse(args.file)
+        if args.html is not None:
+            from vie.report.video import write_video_report
+
+            write_video_report(analysis, args.html)
+            log.info("report written to %s", args.html)
+        _render_analysis(analysis, as_json)
+        return 0
+    except (FileNotFoundError, SchemaError, VideoDecodeError) as exc:
+        log.error("%s", exc)
+        return 2
+
+
+def _run_video_search(args: argparse.Namespace, config: Config, as_json: bool) -> int:
+    from dataclasses import asdict
+
+    from vie.video.store import VideoStore
+    from vie.video.understand import format_clock
+
+    if (args.query is None) == (args.image is None):
+        log.error("give exactly one of --query or --image")
+        return 2
+    if not Path(config.database_path).exists():
+        log.error("no index at %s: run 'vie video index' first", config.database_path)
+        return 2
+
+    store = VideoStore(config)
+    store.initialise()
+    bundle, _, encoder = _load_runtime(config)
+    with store.connect() as conn:
+        store.index.check_embedding_model(conn, config.models["vision_language"])
+        if args.image is not None:
+            from vie.query import query_face_embedding
+
+            try:
+                moments = store.search_face(
+                    conn, query_face_embedding(args.image, config, bundle), args.top_k
+                )
+            except ValueError as exc:
+                log.error("%s", exc)
+                return 1
+        else:
+            moments = store.search_speech(conn, args.query, args.top_k)
+            moments += store.search_visual(
+                conn, encoder.encode_text(args.query), top_k=args.top_k
+            )
+
+    if as_json:
+        print(json.dumps([asdict(m) for m in moments], indent=2, ensure_ascii=False))
+    elif not moments:
+        print("no matches")
+    else:
+        from rich.console import Console
+        from rich.table import Table
+
+        table = Table(box=None, header_style="dim", pad_edge=False)
+        for column in ("video", "from", "to", "score", "matched on"):
+            table.add_column(column, overflow="fold")
+        for moment in moments:
+            table.add_row(
+                moment.video_key, format_clock(moment.start), format_clock(moment.end),
+                f"{moment.score:.3f}", moment.text or moment.kind,
+            )
+        Console().print(table)
+    return 0 if moments else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     configure(getattr(args, "log_level", "INFO"))
@@ -207,6 +367,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     if args.command == "search":
         return _run_search(args, config, as_json)
+    if args.command == "video":
+        return _run_video(args, config, as_json)
     return 2
 
 

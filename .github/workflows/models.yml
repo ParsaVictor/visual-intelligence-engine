@@ -27,7 +27,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install "torch==2.5.1" "torchvision==0.20.1" \
             --index-url https://download.pytorch.org/whl/cpu
-          pip install -e ".[models,cpu,ann,dev]" "transformers==4.46.3"
+          pip install -e ".[models,cpu,ann,video,speech,dev]" "transformers==4.46.3"
           pip install scikit-image
           pip freeze | grep -iE "^(torch|transformers|numpy|av|ultralytics|insightface|onnxruntime)"
       - name: Cache model weights
@@ -56,6 +56,14 @@ jobs:
         if: always()
         run: python scripts/benchmark.py --encoder --out benchmarks/results-ci.json
 
+      - name: Understand a real film, every stage on
+        if: always()
+        run: |
+          curl -sSL -o film.mov \
+            http://ftp.nluug.nl/pub/graphics/blender/demo/movies/ToS/tears_of_steel_720p.mov
+          vie video analyze film.mov --max-duration 240 --transcribe \
+            --html benchmarks/film-report.html --json > benchmarks/film-analysis.json
+
       - name: Keep the results
         if: always()
         uses: actions/upload-artifact@v4
@@ -63,3 +71,4 @@ jobs:
           name: real-model-results
           path: |
             benchmarks/*.json
+            benchmarks/*.html

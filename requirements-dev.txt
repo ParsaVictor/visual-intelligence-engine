@@ -7,5 +7,6 @@ pyyaml==6.0.2
 rich==13.9.4
 opencv-python-headless==4.10.0.84
 pillow==11.0.0
+av==13.1.0
 pytest==8.3.4
 ruff==0.8.4

@@ -120,3 +120,8 @@ food_boxes(file_name, bbox, confidence, class_id, PK (file_name, bbox))
 
 `file_name` is the gallery-relative path. For a flat gallery that is the bare name older
 versions stored, so existing rows stay valid.
+<!-- video-start -->
+
+Video adds `videos`, `video_keyframes`, `video_faces` and `video_transcript` to the same
+file. See [video.md](video.md).
+<!-- video-end -->
