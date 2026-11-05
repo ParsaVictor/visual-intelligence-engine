@@ -2,8 +2,8 @@
 
 The pipeline and the search modules only know about small protocols
 (:class:`vie.indexing.FaceDetector`, :class:`vie.indexing.BoxDetector`,
-``CropScorer``). Everything model-specific — MegaDetector's raw tensor layout,
-RT-DETR's result objects, InsightFace's ``Face`` records — is confined here, so
+``CropScorer``). Everything model-specific (MegaDetector's raw tensor layout,
+RT-DETR's result objects, InsightFace's ``Face`` records) is confined here, so
 swapping a model touches one file and no tests.
 """
 
@@ -17,7 +17,7 @@ from typing import Any
 from vie.config import Config
 from vie.geometry import Box
 from vie.logging_setup import get_logger
-from vie.models import ModelBundle
+from vie.models import ModelBundle, bgr_to_pil
 from vie.quality import is_usable_face
 
 log = get_logger("adapters")
@@ -27,19 +27,19 @@ class InsightFaceDetector:
     """InsightFace ``buffalo_l``: RetinaFace detection + ArcFace embeddings.
 
     Applies a deliberately permissive quality gate. Anything RetinaFace is even
-    moderately confident about gets indexed — the gate exists only to drop
+    moderately confident about gets indexed. The gate exists only to drop
     detections too degraded to carry identity, because such an embedding does
     not merely fail to match, it matches the *wrong person*.
     """
 
     def __init__(self, bundle: ModelBundle, config: Config) -> None:
-        self.app = bundle.face_app
+        self.bundle = bundle
         self.config = config
         self.rejected = 0
 
     def detect(self, image: Any) -> list[tuple[Box, Any]]:
         out: list[tuple[Box, Any]] = []
-        for face in self.app.get(image):
+        for face in self.bundle.face_app.get(image):
             box = tuple(int(v) for v in face.bbox[:4])
             score = float(getattr(face, "det_score", 1.0))
             if not is_usable_face(score, box, self.config.face.min_det_score,
@@ -55,69 +55,104 @@ class InsightFaceDetector:
 class MegaDetectorAdapter:
     """MegaDetector v5a via the raw YOLOv5 head.
 
-    The raw tensor is 0-indexed (0=animal, 1=person, 2=vehicle) — *not* the
-    1/2/3 convention MegaDetector's published JSON API uses. Getting this wrong
+    The raw tensor is 0-indexed (0=animal, 1=person, 2=vehicle), *not* the 1/2/3
+    convention MegaDetector's published JSON API uses. Getting this wrong
     silently indexes vehicles as wildlife.
     """
 
     def __init__(self, bundle: ModelBundle) -> None:
-        self.model = bundle.animal_detector
+        self.bundle = bundle
+
+    def detect_batch(
+        self, images: Sequence[Any], classes: Sequence[int], confidence: float
+    ) -> list[list[tuple[Box, float]]]:
+        import torch
+
+        model = self.bundle.animal_detector
+        # AutoShape applies its own confidence floor (0.25 by default) before we
+        # see anything, which would silently undercut a more permissive gate.
+        model.conf = min(confidence, 0.25)
+        wanted = set(classes)
+        # AutoShape reads NumPy input as RGB, while OpenCV hands us BGR.
+        rgb = [image[:, :, ::-1].copy() for image in images]
+        with torch.no_grad():
+            results = model(rgb).xyxy
+
+        out: list[list[tuple[Box, float]]] = []
+        for predictions in results:
+            found: list[tuple[Box, float]] = []
+            for row in predictions.cpu().numpy():
+                x1, y1, x2, y2, score, class_id = row[:6]
+                if int(class_id) in wanted and float(score) >= confidence:
+                    found.append(((int(x1), int(y1), int(x2), int(y2)), float(score)))
+            out.append(found)
+        return out
 
     def detect(
         self, image: Any, classes: Sequence[int], confidence: float
     ) -> list[tuple[Box, float]]:
-        import torch
-
-        wanted = set(classes)
-        with torch.no_grad():
-            predictions = self.model(image).xyxy[0].cpu().numpy()
-
-        out: list[tuple[Box, float]] = []
-        for row in predictions:
-            x1, y1, x2, y2, score, class_id = row[:6]
-            if int(class_id) not in wanted or float(score) < confidence:
-                continue
-            out.append(((int(x1), int(y1), int(x2), int(y2)), float(score)))
-        return out
+        return self.detect_batch([image], classes, confidence)[0]
 
 
 class RTDetrAdapter:
     """RT-DETR-X restricted to the configured COCO classes."""
 
     def __init__(self, bundle: ModelBundle) -> None:
-        self.model = bundle.object_detector
+        self.bundle = bundle
+
+    def detect_batch(
+        self, images: Sequence[Any], classes: Sequence[int], confidence: float
+    ) -> list[list[tuple[Box, float, int]]]:
+        results = self.bundle.object_detector(
+            list(images), classes=list(classes), conf=confidence, verbose=False
+        )
+        out: list[list[tuple[Box, float, int]]] = []
+        for result in results:
+            found: list[tuple[Box, float, int]] = []
+            for box in result.boxes:
+                x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
+                found.append(((x1, y1, x2, y2), float(box.conf[0]), int(box.cls[0])))
+            out.append(found)
+        return out
 
     def detect(
         self, image: Any, classes: Sequence[int], confidence: float
-    ) -> list[tuple[Box, float]]:
-        results = self.model(image, classes=list(classes), conf=confidence, verbose=False)
-        out: list[tuple[Box, float]] = []
-        for result in results:
-            for box in result.boxes:
-                x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
-                out.append(((x1, y1, x2, y2), float(box.conf[0])))
-        return out
+    ) -> list[tuple[Box, float, int]]:
+        return self.detect_batch([image], classes, confidence)[0]
 
 
-def load_image(path: Path) -> Any:
-    """Decode an image and cap its longest side.
+def load_scaled(path: Path, cap: int) -> tuple[Any, float] | None:
+    """Decode an image, cap its longest side, and report the factor applied.
 
     A 6000 px press photo costs decode time and PCIe bandwidth for detail no
     detector running at 640 px input can use.
     """
     import cv2
+    import numpy as np
 
-    image = cv2.imread(str(path))
+    # cv2.imread cannot open a non-ASCII path on Windows and just returns None,
+    # which would hide every Persian-named file in the gallery.
+    try:
+        encoded = np.fromfile(str(path), dtype=np.uint8)
+    except OSError:
+        return None
+    image = cv2.imdecode(encoded, cv2.IMREAD_COLOR) if encoded.size else None
     if image is None:
         return None
     height, width = image.shape[:2]
-    cap = 1600
-    if max(height, width) > cap:
-        scale = cap / max(height, width)
-        image = cv2.resize(
-            image, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA
-        )
-    return image
+    if max(height, width) <= cap:
+        return image, 1.0
+    scale = cap / max(height, width)
+    resized = cv2.resize(
+        image, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA
+    )
+    return resized, scale
+
+
+def load_image(path: Path, cap: int = 1600) -> Any:
+    """Decode an image for query-time use, discarding the scale."""
+    loaded = load_scaled(path, cap)
+    return None if loaded is None else loaded[0]
 
 
 def image_size(image: Any) -> tuple[int, int]:
@@ -126,15 +161,12 @@ def image_size(image: Any) -> tuple[int, int]:
 
 
 def crop(image: Any, box: Box) -> Any:
-    """Crop to a box and convert to the RGB PIL image CLIP expects."""
-    import cv2
-    from PIL import Image
-
+    """Crop to a box and convert to the RGB PIL image the encoders expect."""
     x1, y1, x2, y2 = box
     patch = image[y1:y2, x1:x2]
     if patch.size == 0:
         return None
-    return Image.fromarray(cv2.cvtColor(patch, cv2.COLOR_BGR2RGB))
+    return bgr_to_pil(patch)
 
 
 @dataclass
@@ -142,13 +174,16 @@ class Detectors:
     face: InsightFaceDetector
     animal: MegaDetectorAdapter
     food: RTDetrAdapter
-    loader: Any = load_image
+    loader: Any
     size_of: Any = image_size
+    crop: Any = crop
 
 
 def build_detectors(bundle: ModelBundle, config: Config) -> Detectors:
+    cap = config.face.max_index_dimension
     return Detectors(
         face=InsightFaceDetector(bundle, config),
         animal=MegaDetectorAdapter(bundle),
         food=RTDetrAdapter(bundle),
+        loader=lambda path: load_scaled(path, cap),
     )

@@ -7,8 +7,8 @@ ones where the obvious option was deliberately rejected.
 
 ## Contrastive prompts instead of a similarity threshold
 
-Three of the four search paths ask CLIP the same question, and it is not "how
-similar is this crop to the query". It is:
+Species and dish search ask the model the same question, and it is not "how similar
+is this crop to the query". It is:
 
 ```python
 prompts = [
@@ -16,26 +16,32 @@ prompts = [
     "a photo of a different kind of animal",        # rival
     "a photo of scenery with no animal in it",      # rival
 ]
-score = softmax(logits)[0]
 ```
 
-**Why this beats thresholding a raw cosine.** A cosine similarity has no null
-hypothesis. Every crop produces *some* number, and there is no principled place
-to put the cut — the value depends on the query's wording, the crop's framing and
-the domain. A softmax over rivals gives the model an explicit "none of the above"
-option, so the output is a posterior over a closed set of explanations and a
-fixed threshold means the same thing across queries.
+A cosine similarity has no null hypothesis. Every crop produces *some* number, and there
+is no principled place to cut it. Rivals give the model an explicit "none of the above".
 
-The difference is visible in this project's own demo output. The food path, which
-uses rivals, reports 96–99% for correct hits. The free-text path, which uses raw
-cosine, reports **23.30%** for *its* best hit — a perfectly healthy CLIP score
-that reads like failure. Same model, same image space; only the decision rule
-differs.
+### Which number to threshold was measured, and the first answer was wrong
 
-This is also why the animal path was rebuilt. It previously used an ImageNet-1k
-classifier with no confidence floor whatsoever, so a 1000-way softmax always
-returned something, and a 21.5% top-1 shipped as a confirmed match with a green
-box drawn on it.
+The code used to document that SigLIP must be read through its absolute sigmoid, and
+that softmax over its logits was a defect. `scripts/calibrate.py` compared the options
+on real images (`siglip-base-patch16-224`, 72 public images):
+
+| Rule | AUC, food / species | Best threshold, food / species | True match, typical |
+|:--|--:|--:|--:|
+| Absolute sigmoid | 1.000 / 1.000 | 0.05 / 0.003 | 63% / **2.4%** |
+| Softmax over rivals | 0.999 / 1.000 | 0.98 / 0.93 | 100% / 97% |
+| Logit margin | 0.999 / 1.000 | +4.1 / +2.5 | +8.3 / +3.3 |
+
+All three rank about equally. What differs is whether there is a usable threshold. The
+absolute sigmoid's best cut differs by a factor of eighteen between domains, and a
+correct "cat" reads as 2%. SigLIP's learned bias makes every prompt improbable by
+default, but the bias cancels in a difference. So recognition scores the **sigmoid of
+the logit margin over the strongest rival**.
+
+The thresholds it replaced were carried over from CLIP. On the same pairs, with the default
+so400m model, they gave 46% precision on food and 57% on species. The numbers now are in the
+README.
 
 ---
 
@@ -72,23 +78,25 @@ nine pixels across by the time it reaches the first convolution.
 
 ---
 
-## No approximate index (yet)
+## Exact search until the numbers say otherwise
 
-The architecture diagram claimed FAISS. The code did a plain NumPy loop, and
-still does.
+The architecture diagram once claimed FAISS while the code did a NumPy loop. The
+assumption after that was a crossover at about 100k vectors. Measured through the real
+code path, on 4 vCPU with 1152-d clustered synthetic vectors:
 
-**This is the correct choice at current scale, not an omission.** Measured on the
-demo archive, a full scan of every indexed face answers in **0.0025 s**. FAISS
-would add a dependency, an index build step, a tuning surface and approximate
-recall — to optimise something already three orders of magnitude below human
-perception.
+| Vectors | Load | Exact | HNSW | HNSW recall@10 |
+|--:|--:|--:|--:|--:|
+| 10,000 | 83 ms | 0.6 ms | 0.6 ms | 0.98 |
+| 100,000 | 785 ms | 10 ms | 1.1 ms | 0.81 |
 
-The crossover is around **10⁵ vectors**. Below it, a contiguous float32 matrix
-multiply beats a graph traversal because it is one BLAS call with perfect cache
-behaviour. Above it, memory bandwidth dominates and an approximate index wins.
+HNSW is faster at 100k, nobody can perceive the difference, and it silently loses one true
+result in five at these settings. So `search.backend: auto` stays exact until 500k, and
+FAISS is an optional extra. Load time is the larger cost at scale. A one-shot CLI pays it
+on every query, while a resident process such as the demo pays it once.
 
-Tracked as a roadmap item with that trigger recorded, so the decision is
-revisited when the data justifies it rather than when it would look impressive.
+On a 4 GB laptop under memory pressure the same load took 10 s rather than 0.8 s. Run
+this where it will actually be used, because memory changes the answer by an order of
+magnitude.
 
 ---
 
@@ -148,3 +156,17 @@ lives in `vie.adapters`.
 This is what makes the decision rules testable. The regression tests that pin
 each historical defect run in under two seconds, on any machine, with no GPU and
 no model download — because what needs pinning is the logic, not the weights.
+
+---
+
+## Real weights in CI, because test doubles cannot see this
+
+Every defect in this list passed a full green suite:
+
+- SigLIP tokenized with the wrong padding (no error, wrong vectors)
+- BGR sent to an RGB model (no error, wrong vectors)
+- thresholds on another model's scale (no error, 46% precision)
+
+`tests/test_integration.py` runs the real wiring with fake weights in seconds on every
+push. `.github/workflows/models.yml` runs real weights on real images and real footage.
+Both exist because the fast suite alone was not enough.

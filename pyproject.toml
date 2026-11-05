@@ -4,34 +4,63 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "visual-intelligence-engine"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Multimodal search over an image archive: faces, species, food and free text on one index"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Mohammad Parsa Karkooti", email = "1.parsa.karkooti@gmail.com" }]
-dependencies = ["numpy>=1.24", "pyyaml>=6.0"]
+dependencies = ["numpy>=1.24", "pyyaml>=6.0", "rich>=13.0"]
 
 [project.optional-dependencies]
-# Model runtimes are a separate extra so the core logic — and its test suite —
-# can be installed and exercised without a multi-gigabyte download.
+# Model runtimes are a separate extra so the core logic, and its test suite, can
+# be installed and exercised without a multi-gigabyte download.
 models = [
   "torch>=2.1",
   "torchvision>=0.16",
-  "transformers>=4.36",
+  # SigLIP landed in 4.37.
+  "transformers>=4.37,<5",
+  "sentencepiece>=0.2",
+  "protobuf>=4.25",
   "ultralytics>=8.1",
+  # What the pinned yolov5 revision imports at load time, for MegaDetector. It sets
+  # these up only partly on its own, so a fresh install failed on the first image.
+  "pandas>=2.0",
+  "seaborn>=0.13",
+  "gitpython>=3.1",
+  "psutil>=5.9",
+  "scipy>=1.11",
+  "thop>=0.1.1",
+  "requests>=2.31",
+  "tqdm>=4.66",
+  "matplotlib>=3.8",
+  "ipython>=8.0",
+  # yolov5 imports pkg_resources, which setuptools 81 removed.
+  "setuptools<81",
   "insightface>=0.7",
-  "onnxruntime-gpu>=1.17",
-  "opencv-python>=4.8",
+  # insightface depends on the headless build; installing both breaks cv2.
+  "opencv-python-headless>=4.8",
   "pillow>=10.0",
 ]
-demo = ["gradio>=4.44"]
-dev = ["pytest>=7.4", "ruff>=0.4"]
+# Exactly one ONNX runtime: they conflict, and the GPU one does not exist on macOS.
+cpu = ["onnxruntime>=1.17"]
+gpu = ["onnxruntime-gpu>=1.17"]
+ann = ["faiss-cpu>=1.8"]
+demo = ["gradio>=6.0"]
+# No torch: the end-to-end tests use real image files and real decoding, with only
+# the weights faked, so they still run in seconds on any machine.
+dev = ["pytest>=7.4", "ruff>=0.4", "opencv-python-headless>=4.8", "pillow>=10.0"]
 
 [project.scripts]
 vie = "vie.cli:main"
 
+[tool.setuptools.dynamic]
+version = { attr = "vie.__version__" }
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+vie = ["default.yaml"]
 
 [tool.ruff]
 line-length = 100
@@ -40,7 +69,14 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.per-file-ignores]
+# Embedded stylesheets read better one rule per line than wrapped.
+"src/vie/report/*.py" = ["E501"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -m 'not models'"
 pythonpath = ["src"]
+markers = [
+  "models: runs real model weights; slow, needs the models extra (pytest -m models)",
+]

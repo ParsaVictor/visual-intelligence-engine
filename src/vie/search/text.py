@@ -16,12 +16,15 @@ without pretending the cosine itself is a probability.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from dataclasses import replace
 
 import numpy as np
 
 from vie.config import Config
+from vie.quality import expected_vectors
 from vie.scoring import Match
+from vie.vectorstore import VectorCatalog
 
 #: One indexed region: (file_name, embedding, file_path, region).
 #: Several rows share a file_name when multi-crop indexing is on.
@@ -69,6 +72,45 @@ def rank(
     ranked = sorted(best.values(), key=lambda m: m.score, reverse=True)
     limit = config.top_k if top_k is None else top_k
     return ranked[:limit]
+
+
+def rank_catalog(
+    query_embedding: np.ndarray,
+    catalog: VectorCatalog,
+    file_paths: dict[str, str],
+    config: Config,
+    top_k: int | None = None,
+) -> list[Match]:
+    """:func:`rank` over a loaded catalog.
+
+    Asking for ``limit x regions per image`` guarantees ``limit`` distinct images
+    even in the worst case, where one image's crops fill the top of the ranking.
+    """
+    limit = config.top_k if top_k is None else top_k
+    layout = config.crop_layout if config.multi_crop else "1"
+    best: dict[str, Match] = {}
+    for name, region, score in catalog.search(query_embedding, limit * expected_vectors(layout)):
+        if name not in best:  # results arrive best first
+            best[name] = Match(file_name=name, file_path=file_paths.get(name, name),
+                               score=score, label=region)
+    return sorted(best.values(), key=lambda m: m.score, reverse=True)[:limit]
+
+
+def with_confidence(
+    matches: list[Match], calibrate: Callable[[float], float | None] | None
+) -> list[Match]:
+    """Attach what a reader should see (P3-3).
+
+    SigLIP has a learned bias, so its sigmoid is a probability the caption is
+    true of the image. CLIP has none, so it gets :func:`relative_confidence`,
+    which says how much better a hit is than its neighbours and nothing more.
+    """
+    if not matches:
+        return matches
+    values = [calibrate(m.score) if calibrate else None for m in matches]
+    if any(v is None for v in values):
+        values = relative_confidence([m.score for m in matches])
+    return [replace(m, confidence=v) for m, v in zip(matches, values, strict=True)]
 
 
 def relative_confidence(scores: list[float], temperature: float = 100.0) -> list[float]:

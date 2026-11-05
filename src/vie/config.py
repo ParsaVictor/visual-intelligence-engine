@@ -26,7 +26,11 @@ from typing import Any
 
 import yaml
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "default.yaml"
+from vie.vectorstore import SearchConfig
+
+#: Ships inside the package. It used to live at the repository root, so anything
+#: but an editable install failed with "config not found" on the first command.
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "default.yaml"
 
 
 class ConfigError(ValueError):
@@ -94,14 +98,26 @@ class FoodConfig:
 
 
 @dataclass(frozen=True)
+class IndexingConfig:
+    batch_size: int = 8
+    workers: int = 8
+    commit_every: int = 50
+    recursive: bool = True
+    trust_mtime: bool = True
+
+
+@dataclass(frozen=True)
 class Config:
     raw: dict[str, Any] = field(repr=False)
     face: FaceConfig
     animal: AnimalConfig
     food: FoodConfig
+    indexing: IndexingConfig
+    search: SearchConfig
     seed: int
     device: str
     half_precision: bool
+    low_memory: bool
     top_k: int
     multi_crop: bool
     crop_layout: str
@@ -131,9 +147,12 @@ class Config:
             face=FaceConfig(**raw["face"]),
             animal=AnimalConfig(**raw["animal"]),
             food=FoodConfig(**raw["food"]),
+            indexing=IndexingConfig(**(raw.get("indexing") or {})),
+            search=SearchConfig(**(raw.get("search") or {})),
             seed=int(raw["project"]["seed"]),
             device=str(raw["runtime"]["device"]),
             half_precision=bool(raw["runtime"]["half_precision"]),
+            low_memory=bool(raw["runtime"].get("low_memory", False)),
             top_k=int(raw["text"]["top_k"]),
             multi_crop=bool(raw["text"].get("multi_crop", False)),
             crop_layout=str(raw["text"].get("crop_layout", "1")),
@@ -212,6 +231,23 @@ class Config:
 
         if self.food.clip_gate_enabled and not self.food.clip_gate_positive:
             problems.append("food.clip_gate_positive must not be empty when the gate is on")
+        if self.food.clip_gate_enabled and not self.food.clip_gate_negative:
+            problems.append("food.clip_gate_negative must not be empty when the gate is on")
+
+        for name, count in (
+            ("indexing.batch_size", self.indexing.batch_size),
+            ("indexing.workers", self.indexing.workers),
+            ("indexing.commit_every", self.indexing.commit_every),
+            ("search.crop_batch", self.search.crop_batch),
+            ("search.ann_candidates", self.search.ann_candidates),
+            ("face.max_index_dimension", self.face.max_index_dimension),
+        ):
+            if count < 1:
+                problems.append(f"{name} must be at least 1, got {count}")
+        if self.search.backend not in {"auto", "exact", "hnsw"}:
+            problems.append(
+                f"search.backend must be auto, exact or hnsw, got {self.search.backend!r}"
+            )
 
         if problems:
             raise ConfigError("invalid configuration:\n  - " + "\n  - ".join(problems))

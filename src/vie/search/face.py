@@ -18,8 +18,10 @@ from collections.abc import Iterable
 import numpy as np
 
 from vie.config import Config
+from vie.database import parse_box
 from vie.geometry import Box
 from vie.scoring import Match, best_per_image
+from vie.vectorstore import VectorCatalog
 
 #: One indexed face: (file_name, box, embedding, file_path).
 IndexedFace = tuple[str, Box, np.ndarray, str]
@@ -60,6 +62,24 @@ def rank(
                     box=box,
                 )
             )
+    return best_per_image(matches)
+
+
+def rank_catalog(
+    query_embedding: np.ndarray,
+    catalog: VectorCatalog,
+    file_paths: dict[str, str],
+    config: Config,
+) -> list[Match]:
+    """:func:`rank` over a loaded catalog: one matrix multiply, not a Python loop."""
+    exact = catalog.backend.name == "exact"
+    k = len(catalog) if exact else config.search.ann_candidates
+    matches = [
+        Match(file_name=name, file_path=file_paths.get(name, name), score=score,
+              box=parse_box(bbox))
+        for name, bbox, score in catalog.search(query_embedding, k)
+        if score >= config.face.match_threshold
+    ]
     return best_per_image(matches)
 
 

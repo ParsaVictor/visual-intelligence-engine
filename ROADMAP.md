@@ -115,48 +115,29 @@ Each task ID maps to one issue — 39 in total.
 
 ---
 
-## Phase 6 — Scale & polish — *partially done*
+## Phase 6: Scale and polish
 
-> Nothing here is needed today. Listed so the growth path is explicit.
-
-| ID | Cat | Task | Trigger |
+| ID | Cat | Task | State |
 |:--|:--|:--|:--|
-| P6-1 | ⚡ | ANN index (FAISS / hnswlib) | **Only past ~100 k vectors.** At 65 images brute force answers in 0.0025 s; adding FAISS now would be over-engineering | 
-| P6-2 | ⚡ | Batched inference for indexing | When indexing time becomes the bottleneck |
-| P6-3 | 🏗️ | Docker image | When others need to reproduce the environment |
-| P6-4 | 🏗️ | REST API (FastAPI) | When something other than a CLI must call it |
+| P6-1 | ⚡ | ANN index | ✅ `VectorCatalog` with optional FAISS HNSW. Exact until 500k, by measurement |
+| P6-2 | ⚡ | Batched inference for indexing | ✅ with per-image failure isolation |
+| P6-3 | 🏗️ | Docker image | Rewritten, non-root, build not yet verified |
+| P6-4 | 🏗️ | REST API (FastAPI) | Deliberately not done. Trigger: something other than a CLI must call it |
 
 ---
 
-## Sequencing
-
-```
-Phase 0  ─────┐
-              ├──> Phase 1 (critical fixes) ──> Phase 2 (architecture) ──┐
-              │                                                          │
-              └──> Phase 5-1 (fix diagram, can run in parallel)          │
-                                                                         │
-              Phase 3 (models) <────────────────────────────────────────┘
-                    │
-                    └──> Phase 4 (quality) ──> Phase 5 (presentation) ──> public release
-                                                                              │
-                                                                    Phase 6 when scale demands
-```
-
 ## Where this stands
 
-Phases 1 through 5 are complete: every known correctness defect is fixed and pinned by a
-regression test, the notebooks are an installable package with a CLI, and the docs match
-the code. 120 tests run in about two seconds with no GPU and no model download.
+[docs/AUDIT.md](docs/AUDIT.md) records what an audit of v0.2 found: phases 1 to 5 had been
+marked complete while several of those items were not connected to the running system.
+That has been fixed, and the honest state is:
 
-Two things remain, and neither can be done from the code:
-
-1. **P0-3 — ownership and licence.** The original work was produced in a client context.
-   Until ownership and the right to publish are confirmed in writing, the repository
-   stays private and `LICENSE` stays unset. **This is the only blocker on going public.**
-2. **P4-4 — measured benchmarks.** `scripts/benchmark.py` is written and ready, but it
-   has not been run: that needs the real gallery and a GPU. Until then the README claims
-   no performance figures at all, which is deliberate.
-
-Everything else on this page is either done or explicitly deferred with a trigger
-recorded (Phase 6).
+1. **P0-3, ownership and licence: open, and the owner's decision.** The original work was
+   produced in a client context. `LICENSE` stays unset until ownership is confirmed in
+   writing. This page said the repository would stay private until then, and GitHub
+   reports it as public, which needs a deliberate decision.
+2. **P4-4, benchmarks: partly done.** Search mechanics and scoring rules are measured and in
+   the README. Accuracy on a real archive and anything on a GPU are not, because they need
+   the real gallery and a GPU.
+3. **P5-4, demo assets: partly done.** Real output is above the fold in the README. A
+   recording of a live query against the real gallery still needs that gallery.

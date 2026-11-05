@@ -8,7 +8,7 @@ different objectives, and that changes how their raw logits should be read.
 **CLIP** uses a softmax over a batch: for one image it asks "which of these N
 captions is the right one?" Its logits are only meaningful *relative to each
 other*, and the answer always sums to 1 across the candidates. That is exactly
-why the contrastive-prompt trick works — supply rival prompts and the softmax
+why the contrastive-prompt trick works: supply rival prompts and the softmax
 becomes a real posterior.
 
 **SigLIP** replaces that with an independent sigmoid per image-text pair: "is
@@ -19,13 +19,11 @@ no normalisation across candidates.
 The practical consequence: running softmax over SigLIP logits throws away the
 bias term that makes the score absolute, and running sigmoid over CLIP logits
 produces a number with no calibration at all. Same-looking tensors, different
-meaning — which is why :class:`vie.config.Config` refuses a mismatched pairing.
+meaning, which is why :class:`vie.config.Config` refuses a mismatched pairing
+and why both recognition paths score through :func:`hypothesis_score` here.
 
-What SigLIP buys
-----------------
-Because the sigmoid loss needs no batch-wide normalisation, SigLIP trains
-efficiently at small batch sizes and reaches better accuracy per parameter:
-
+Model choice
+------------
 ======================================  =======  ==================
 model                                   params   ImageNet 0-shot
 ======================================  =======  ==================
@@ -34,9 +32,7 @@ model                                   params   ImageNet 0-shot
 ``google/siglip-so400m-patch14-384``    877 M    ~83.2 %
 ======================================  =======  ==================
 
-Figures are the published ones, not measured here. The base SigLIP is the
-default: it beats the CLIP this project started with while being roughly half
-its size, so both quality and speed improve at once.
+Figures are the published ones, not measured here. ``so400m`` is the default.
 """
 
 from __future__ import annotations
@@ -71,13 +67,27 @@ def _sigmoid(value: float) -> float:
     return e / (1.0 + e)
 
 
+def similarity_to_probability(cosine: float, logit_scale: float, logit_bias: float) -> float:
+    """SigLIP's own calibrated reading of a cosine, as trained.
+
+    This is what makes the free-text path honest: a raw SigLIP cosine of 0.2 says
+    little to a reader, while the model's sigmoid says how likely the caption is
+    to be true of the image. Only meaningful for models with a learned bias.
+    """
+    return _sigmoid(cosine * logit_scale + logit_bias)
+
+
 def hypothesis_score(logits: Sequence[float], mode: str) -> float:
-    """Score the first prompt against the rest.
+    """Score the first prompt against the rest, in [0, 1].
 
     ``softmax``  posterior of the hypothesis among rivals (CLIP).
-    ``sigmoid``  the hypothesis' own probability, damped when a rival scores
-                 higher — SigLIP's per-pair probability is absolute, so the
-                 rivals act as a veto rather than as normalisation.
+    ``sigmoid``  the sigmoid of the logit margin over the strongest rival (SigLIP).
+
+    The margin is a measured choice (``scripts/calibrate.py``). SigLIP's absolute
+    probability ranks just as well, but it is a poor thing to threshold: on real
+    photos the best cut was 0.05 for dishes and 0.003 for animals, and a correct "cat"
+    typically scored 2%. Its learned bias makes every prompt improbable by default,
+    and the bias cancels in a difference, leaving a scale that holds across domains.
     """
     if not logits:
         raise ValueError("logits must not be empty")
@@ -89,28 +99,19 @@ def hypothesis_score(logits: Sequence[float], mode: str) -> float:
 
     if mode == SOFTMAX:
         return _softmax(list(logits))[0]
-
     if mode == SIGMOID:
-        probs = [_sigmoid(v) for v in logits]
-        hypothesis, rivals = probs[0], probs[1:]
-        best_rival = max(rivals)
-        if best_rival >= hypothesis:
-            # A rival explains the image at least as well: reject rather than
-            # report a high absolute probability for the wrong reason.
-            return hypothesis * (hypothesis / (hypothesis + best_rival))
-        return hypothesis
-
+        return _sigmoid(logits[0] - max(logits[1:]))
     raise ValueError(f"unknown score mode {mode!r}")
 
 
 def gate_score(
     logits: Sequence[float], n_positive: int, mode: str
 ) -> float:
-    """Margin between the best positive and the best negative prompt.
+    """How much more this looks like the positive prompts than the negative ones.
 
-    Used by the food gate: several ways of saying "this is food" against
-    several ways of saying "this is not". Returns a value in [-1, 1] where
-    positive means the image looks more like food than not.
+    Used by the food gate. Positive means the image looks more like food than not.
+    ``sigmoid`` mode returns the logit margin, which is unbounded; ``softmax`` returns
+    a probability gap in [-1, 1]. Thresholds are therefore specific to the mode.
     """
     if n_positive <= 0 or n_positive >= len(logits):
         raise ValueError(
@@ -119,10 +120,8 @@ def gate_score(
         )
 
     if mode == SIGMOID:
-        probs = [_sigmoid(v) for v in logits]
-    elif mode == SOFTMAX:
+        return max(logits[:n_positive]) - max(logits[n_positive:])
+    if mode == SOFTMAX:
         probs = _softmax(list(logits))
-    else:
-        raise ValueError(f"unknown score mode {mode!r}")
-
-    return max(probs[:n_positive]) - max(probs[n_positive:])
+        return max(probs[:n_positive]) - max(probs[n_positive:])
+    raise ValueError(f"unknown score mode {mode!r}")

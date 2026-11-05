@@ -14,6 +14,7 @@ the photographs themselves.
 | `*.db` / `*.sqlite` | contains face embeddings — biometric identifiers |
 | `*.pkl`, `*.npy` | cached embeddings |
 | model weights | large, and redistributable only under their own licences |
+| generated reports (`--html`) | embed thumbnails, faces included |
 
 `.gitignore` blocks all of these. Verify with `git status` after any pipeline
 run — a clean tree is the check.
@@ -38,7 +39,12 @@ run — a clean tree is the check.
 - Embeddings are stored as raw float32, **not pickle**. `pickle.loads` on an
   index file you did not create is arbitrary code execution, and index files get
   copied between machines.
-- Model weights are downloaded from their official release URLs at first run.
+- Model weights are downloaded from their official release URLs at first run. The
+  MegaDetector checkpoint executes code when loaded, so its SHA-256 is pinned and
+  verified before loading.
+- Reports are self-contained and fetch nothing. The demo turns off Gradio's analytics and
+  uses system fonts, so opening it tells no third party anything. `--share` exposes it
+  publicly through Gradio's relay, so do not use it with real data.
 
 ## Reporting a vulnerability
 

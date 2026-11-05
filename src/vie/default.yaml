@@ -17,13 +17,40 @@ paths:
 
 runtime:
   device: auto          # auto | cuda | cpu
-  half_precision: true  # applies to CLIP only; see docs/design-decisions.md
+  half_precision: true  # applies to the vision-language model only; see docs/design-decisions.md
+  # Load the vision-language model with half the peak memory. Turn on if loading
+  # dies with no message or an access violation: that means memory ran out.
+  low_memory: false
+
+indexing:
+  batch_size: 8      # images per forward pass; multi-crop multiplies this by 6
+  workers: 8         # decode threads
+  commit_every: 50   # images between checkpoints
+  recursive: true    # walk sub-folders of the gallery
+  # Skip a file whose size and mtime are unchanged without reading it. An archive
+  # of tens of thousands would otherwise re-hash every byte on each run.
+  # `vie index --rehash` forces the full check.
+  trust_mtime: true
+
+search:
+  # exact = one matrix multiply, always correct. hnsw = FAISS graph, approximate.
+  # Measured at 100k vectors on 4 CPU cores: exact 10 ms, HNSW 1 ms at recall@10 0.81.
+  # 10 ms is not worth losing one true result in five, so auto stays exact for longer
+  # than the textbook crossover. See docs/design-decisions.md.
+  backend: auto
+  ann_threshold: 500000
+  ann_candidates: 2000   # vectors fetched from HNSW before thresholding
+  hnsw_m: 32
+  hnsw_ef_construction: 200
+  hnsw_ef_search: 256
+  crop_batch: 32         # crops per forward pass at query time
 
 models:
-  # SigLIP replaces CLIP: better zero-shot at half the parameters.
-  # base-patch16-224 = 203M params, ~76.2% ImageNet 0-shot (published)
-  # CLIP ViT-L/14    = 428M params, ~75.5%
-  # Swap to google/siglip-so400m-patch14-384 for ~83.2% at 877M params.
+  # Published ImageNet zero-shot accuracy, not measured here:
+  #   openai/clip-vit-large-patch14      428M params  ~75.5%
+  #   google/siglip-base-patch16-224     203M params  ~76.2%   (runs on a laptop CPU)
+  #   google/siglip-so400m-patch14-384   877M params  ~83.2%   (wants a GPU)
+  # Changing this requires `vie index --rebuild`; the index refuses to mix models.
   vision_language: google/siglip-so400m-patch14-384
   # "sigmoid" for SigLIP, "softmax" for CLIP -- they are trained with
   # different objectives and their logits are not interchangeable.
@@ -45,8 +72,8 @@ face:
   det_size_large: 640
   det_size_small: 320
   small_image_px: 400
-  # Index-time image cap; large press photos are downscaled before detection.
-  max_index_dimension: 1000
+  # Image cap, in pixels, applied to the longest side before any model runs.
+  max_index_dimension: 1600
 
 animal:
   # MegaDetector v5a raw YOLOv5 head: 0=animal, 1=person, 2=vehicle.
@@ -80,7 +107,7 @@ animal:
   classifier_threshold: 0.25         # minimum softmax probability to accept
 
   # CLIP fallback: posterior against the rival prompts below.
-  match_threshold: 0.55
+  match_threshold: 0.91
   negative_prompts:
     - "a photo of a different kind of animal"
     - "a photo of scenery with no animal in it"
@@ -97,7 +124,7 @@ food:
   min_crop_px: 50
   padding_px: 20
 
-  match_threshold: 0.60
+  match_threshold: 0.98
   negative_prompts:
     - "a photo of a completely different food"
     - "a photo of an empty plate or background"
@@ -110,7 +137,7 @@ food:
   # of kebab or ghormeh sabzi fires none of them, so a detector-only gate
   # silently drops those photos from the index entirely.
   clip_gate_enabled: true
-  clip_gate_threshold: 0.10
+  clip_gate_threshold: -1.0
   clip_gate_positive:
     - "a photo of food"
     - "a photo of a meal on a plate"

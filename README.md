@@ -2,19 +2,18 @@
 
 # Visual Intelligence Engine
 
-**Multimodal search over an image archive — faces, species, food and free text, on one index.**
+**Search images by what is in them: faces, species, food and free text, on one index.**
 
 [![CI](https://github.com/ParsaVictor/visual-intelligence-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/ParsaVictor/visual-intelligence-engine/actions/workflows/ci.yml)
+[![Real models](https://github.com/ParsaVictor/visual-intelligence-engine/actions/workflows/models.yml/badge.svg)](https://github.com/ParsaVictor/visual-intelligence-engine/actions/workflows/models.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-120-brightgreen.svg)](tests/)
 
-Find *"that photo of the minister at the ceremony"* in an archive of tens of
-thousands of unlabelled press photos — by face, by species, by dish, or by
-describing it in plain English.
+Find *"that photo of the minister at the ceremony"* in an archive of unlabelled press
+photos, by face, by species, by dish, or by describing it in plain English.
 
 <div dir="rtl">
 
-جستجوی چندوجهی روی آرشیو تصویری: تشخیص چهره، گونه‌ی جانوری، غذا و جستجوی متنی آزاد — همه روی یک ایندکس واحد.
+جستجوی چندوجهی روی آرشیو تصویری: تشخیص چهره، گونه‌ی جانوری، غذا و جستجوی متنی آزاد.
 
 </div>
 
@@ -22,7 +21,6 @@ describing it in plain English.
 
 ---
 
-## Demo
 
 | Face search | Species search |
 |:--|:--|
@@ -30,44 +28,34 @@ describing it in plain English.
 | **Food search** | **Free-text search** |
 | ![food](assets/demo/food-search.jpg) | ![text](assets/demo/text-search.jpg) |
 
+*Screenshots from the original notebooks, which predate the current scoring.*
+
 ## What it does
 
 | Query | Input | Returns |
 |:--|:--|:--|
-| 👤 **Face** | a photo of a person | every image containing that person, ranked by similarity |
-| 🦁 **Species** | a word — `zebra`, `red panda` | images containing that animal, with the detection boxed |
-| 🍱 **Food** | a dish name — `French fries` | images containing that dish, even in a crowded table scene |
-| 🌐 **Free text** | any description | images matching semantically, with no fixed vocabulary |
+| **Face** | a photo of a person | every image containing that person, ranked by similarity |
+| **Species** | a word: `zebra`, `quokka` | images containing that animal, with the detection boxed |
+| **Food** | a dish: `French fries`, `ghormeh sabzi` | images of that dish, even ones no detector has a class for |
+| **Free text** | any description | images matching semantically, with no fixed vocabulary |
 
 ## How it works
 
-Heavy models run **once per image at index time**. Each image gets three cheap
-boolean flags plus its embeddings; a query narrows the candidate set with plain
-SQL first, then runs vector search only on what survives.
+Heavy models run **once at index time**. A query narrows the candidates with plain SQL
+first, then does expensive work only on what survives.
 
 ```
-index:  image → face · animal · food detectors → flags + embeddings → SQLite
-query:  SQL prefilter → vector search on candidates only → ranked results
+index:  image -> face, animal, food detectors + image vectors -> SQLite
+query:  SQL prefilter -> vector search or stored predictions -> ranked results
 ```
 
-Because the flags come from *class-agnostic* detectors, the recogniser can be
-swapped without re-indexing anything — which is exactly what happened when the
-species path moved from an ImageNet classifier to CLIP.
+A species the classifier knows is answered from stored predictions, with no model
+loaded at all. One it does not know falls back to the vision-language model, so the
+vocabulary stays open.
 
-See **[docs/architecture.md](docs/architecture.md)** for the full data flow and
-**[docs/design-decisions.md](docs/design-decisions.md)** for why the non-obvious
-choices were made.
-
-## Models
-
-Five pretrained models, none fine-tuned. The engineering is in the combination.
-
-| Model | Role | Output |
-|:--|:--|:--|
-| InsightFace `buffalo_l` | RetinaFace detection + ArcFace recognition | 512-d unit vector |
-| MegaDetector v5a | class-agnostic animal localiser | boxes |
-| RT-DETR-X | food and tableware detection | boxes (COCO) |
-| CLIP ViT-L/14 | shared image ↔ text space | 768-d unit vector |
+- [docs/architecture.md](docs/architecture.md): the data flow
+- [docs/design-decisions.md](docs/design-decisions.md): why, including what measurement overturned
+- [docs/AUDIT.md](docs/AUDIT.md): the audit behind v0.3
 
 ## Install
 
@@ -76,100 +64,121 @@ git clone https://github.com/ParsaVictor/visual-intelligence-engine.git
 cd visual-intelligence-engine
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 
-pip install -e ".[models]"     # full stack, needs a GPU for practical speed
-pip install -e ".[dev]"        # core logic + test suite only, no torch
+pip install -e ".[models,gpu]"    # full stack, with CUDA
+pip install -e ".[models,cpu]"    # full stack, without
+pip install -e ".[dev]"           # logic and tests only, no torch
 ```
 
-The core logic has no torch dependency, so the test suite installs and runs in
-seconds on any machine.
+Optional extras: `ann` (FAISS), `demo` (Gradio).
+
+**On a small machine** use `google/siglip-base-patch16-224` and `runtime.low_memory: true`.
+If loading dies with no message or an access violation, memory ran out.
 
 ## Usage
 
-Put your images in `data/gallery/`, then:
+Put images in `data/gallery/`, sub-folders included, then:
 
 ```bash
-vie index
+vie doctor                # is this machine ready, and is the index healthy?
+vie index                 # incremental: only new or changed files
 ```
 
 ```bash
 vie search face   --image query.jpg
 vie search animal --query "red panda"
 vie search food   --query "French fries"
-vie search text   --query "a man with a blue backpack"
+vie search text   --query "a man with a blue backpack" --html results.html
 vie search text   --query "sunset over the city" --json
 ```
 
-Every threshold and class list lives in [`configs/default.yaml`](configs/default.yaml).
-Point at your own with `--config`.
-
-## Interactive demo
+Every threshold lives in [`src/vie/default.yaml`](src/vie/default.yaml). Pass your own with `--config`.
 
 ```bash
 pip install -e ".[demo]"
 python -m vie.demo
 ```
 
-## Configuration
+## Measured
 
-```yaml
-face:
-  match_threshold: 0.46        # cosine on ArcFace embeddings
+Stated with their conditions, and with what they do not show.
 
-animal:
-  gate_confidence: 0.30        # index time — must be ≤ search_confidence
-  search_confidence: 0.40      # query time
-  match_threshold: 0.55        # CLIP posterior against rival prompts
+**Hardware:** GitHub Actions runner, 4 vCPU, 16 GB RAM, no GPU, Python 3.12, torch 2.5.
 
-food:
-  gate_classes:   [39, ..., 55]   # COCO; 56 is 'chair' and excluded
-  search_classes: [45, ..., 55]   # must be a subset of gate_classes
-  match_threshold: 0.60
-```
+### Vector search
 
-`Config.validate()` rejects a gate stricter than its search pass, or a search
-class the gate never indexed. Both were real defects in the original.
+1152-d clustered synthetic vectors, the size SigLIP so400m produces. This measures
+search mechanics, not retrieval quality.
+
+| Vectors | Load from SQLite | Exact search | HNSW search | HNSW recall@10 |
+|:--|--:|--:|--:|--:|
+| 1,000 | 11 ms | 0.04 ms | 0.13 ms | 1.00 |
+| 10,000 | 83 ms | 0.6 ms | 0.6 ms | 0.98 |
+| 100,000 | 785 ms | 10 ms | 1.1 ms | 0.81 |
+
+Exact search stays the default until 500k vectors: 10 ms does not justify losing one true
+result in five. Loading is the larger cost, and a resident process pays it only once.
+
+### Scoring
+
+`google/siglip-so400m-patch14-384`, the default, on 72 public labelled images: Food-101,
+cats and dogs, and everyday objects. The set is small and easy, so read this as a
+comparison between rules, not as expected accuracy.
+
+| Path | v0.2 settings, precision | Now, precision | Now, recall |
+|:--|--:|--:|--:|
+| Species | 57% | 94% | 100% |
+| Food | 46% | 92% | 100% |
+
+`google/siglip-base-patch16-224` gave 84% to 100% and 48% to 90% on the same images, and is
+the choice for a machine without a GPU. Reproduce with
+`scripts/fetch_calibration_data.py` and `scripts/calibrate.py`.
+
+### Encoding
+
+SigLIP so400m on 4 vCPU: 3.5 s per image. Multi-crop encodes six regions per image, so
+indexing without a GPU is slow. Batching saved about 6% on CPU.
+
+**Not measured:** accuracy on a real archive, face recognition quality, and anything on
+a GPU. Calibrate again before trusting a threshold on a different model.
 
 ## Testing
 
 ```bash
-pytest
+pytest              # no GPU, no downloads: real files and decoding, with the weights faked
+pytest -m models    # the real weights
 ```
 
-120 tests, no GPU or model download required. Each one that references a `P1-*`
-or `P2-*` id pins a specific historical defect so it cannot silently return.
+The fast suite goes through the real command line and database. Each test that names a
+defect pins something that actually happened.
 
-## Status
+## Versions
 
-| Area | State |
+| Tag | What it is |
 |:--|:--|
-| Four query paths | ✅ |
-| Installable package + CLI | ✅ |
-| Known correctness defects fixed & pinned | ✅ |
-| Tests & CI | ✅ 120 tests, Python 3.10 / 3.12 |
-| **Measured benchmarks** | ⬜ **not yet run — no performance figures are claimed** |
+| `v0.0.1` | The original artefacts. The notebooks' code was never committed |
+| `v0.1.0` | First complete package, on CLIP |
+| `v0.2.0` | SigLIP upgrade, as it stood before the audit |
+| `v0.3.0` | The audit's fixes: everything connected, measured and tested |
 
-`scripts/benchmark.py` exists to produce them; the numbers will be published
-here with hardware and dataset size stated, and not before.
+Details in [CHANGELOG.md](CHANGELOG.md).
 
 ## Privacy
 
-This system extracts and stores **biometric identifiers of identifiable
-people**. The gallery and the generated database are excluded from version
-control and must never be committed. Anyone deploying it is responsible for
-having a lawful basis to process the images. See [ROADMAP.md](ROADMAP.md) P0-3.
+This system extracts and stores **biometric identifiers of identifiable people**. The
+gallery, footage, index and generated reports are excluded from version control and must
+never be committed. Reports embed thumbnails, faces included. Anyone deploying this is
+responsible for having a lawful basis to process the images. See [SECURITY.md](SECURITY.md).
 
 ## Roadmap
 
-[ROADMAP.md](ROADMAP.md) tracks the remaining work in phases, mirrored on the
-project board.
+[ROADMAP.md](ROADMAP.md) tracks the remaining work.
 
 ## Acknowledgements
 
 [MegaDetector](https://github.com/agentmorris/MegaDetector) ·
 [InsightFace](https://github.com/deepinsight/insightface) ·
-[OpenAI CLIP](https://github.com/openai/CLIP) ·
+[SigLIP](https://github.com/google-research/big_vision) ·
 [Ultralytics](https://github.com/ultralytics/ultralytics)
-
 ## License
 
 To be determined pending an ownership decision on the original work.

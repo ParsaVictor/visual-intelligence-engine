@@ -16,5 +16,6 @@ config, model loading and helpers.
 Every notebook opens with a table of what was wrong in the original and what
 changed, so the reasoning travels with the code.
 
-**The package in `src/` is the maintained version** — it has the test suite and
+These predate v0.3 and still carry the scoring and thresholds of that time, so do not
+treat their numbers as current. **The package in `src/` is the maintained version** — it has the test suite and
 CI. Treat these as documentation you can execute.

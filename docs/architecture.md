@@ -16,23 +16,29 @@ over what the index already knows.
 
 ```mermaid
 flowchart TD
-    A[gallery image] --> B{changed since last run?<br/>SHA-256 content hash}
+    A[gallery image] --> B{changed?<br/>size and mtime, then SHA-256}
     B -- no --> Z[skip]
-    B -- yes --> C[decode + cap longest side<br/>threaded prefetch]
+    B -- yes --> C[decode and cap longest side<br/>bounded threaded prefetch]
 
     C --> D[1 · InsightFace buffalo_l<br/>RetinaFace + ArcFace]
     D --> E[2 · MegaDetector v5a<br/>class-agnostic animal boxes]
     E --> F[3 · RT-DETR-X<br/>food and tableware boxes]
     F --> G{box overlaps a face?}
     G -- yes --> H[reject]
-    G -- no --> I[keep]
+    G -- no --> I[(food_boxes)]
 
-    D --> J[(face_embeddings<br/>512-d, float32)]
-    E --> K[(animal_boxes<br/>box + confidence)]
-    I --> L[(gallery_meta<br/>has_face / has_animal / has_food)]
-    C --> M[CLIP ViT-L/14 image encoder]
-    M --> N[(clip_embeddings<br/>768-d, float32)]
+    D --> J[(face_embeddings<br/>512-d)]
+    E --> K[(animal_boxes)]
+    E --> S[ConvNeXt classifier on each crop] --> T[(animal_predictions<br/>top 5 per crop)]
+    C --> M[vision-language encoder<br/>whole frame + 5 crops, batched]
+    M --> N[(clip_embeddings)]
+    M --> O[food gate: stored vector vs fixed prompts<br/>no extra image inference]
+    O --> L[(gallery_meta<br/>has_face / has_animal / has_food)]
+    I --> L
 ```
+
+Everything written for one image is one transaction, and a batch that fails is retried
+image by image.
 
 **Stage order is load-bearing.** Faces must be detected before food, because the
 food stage rejects boxes that sit on a face. The original ran animal → food →
@@ -46,25 +52,30 @@ flowchart LR
     Q[query] --> R{kind}
 
     R -- face photo --> F1[ArcFace embedding of<br/>the largest face]
-    F1 --> F2[scan face_embeddings<br/>dot product = cosine]
+    F1 --> F2[VectorCatalog over face_embeddings]
     F2 --> F3[threshold 0.46 · one result per image]
 
-    R -- species --> A1[SQL: has_animal = 1]
-    A1 --> A2[load stored boxes<br/>no detector re-run]
-    A2 --> A3[CLIP vs contrastive prompts]
+    R -- species --> A0{in the classifier's<br/>stored vocabulary?}
+    A0 -- yes --> A9[stored predictions<br/>no model loaded]
+    A0 -- no --> A1[SQL: has_animal = 1]
+    A1 --> A2[stored boxes]
+    A2 --> A3[encoder vs contrastive prompts]
 
     R -- dish --> D1[SQL: has_food = 1]
-    D1 --> D2[RT-DETR crops + padding]
-    D2 --> D3[CLIP vs contrastive prompts]
+    D1 --> D2[stored boxes, or the whole<br/>frame if only the gate fired]
+    D2 --> D3[encoder vs contrastive prompts]
 
-    R -- free text --> T1[CLIP text encoder]
-    T1 --> T2[scan clip_embeddings<br/>cosine · top-k]
+    R -- free text --> T1[text encoder]
+    T1 --> T2[VectorCatalog over clip_embeddings<br/>best region per image]
 
-    F3 --> OUT[ranked results]
+    F3 --> OUT[ranked results<br/>boxes in original coordinates]
+    A9 --> OUT
     A3 --> OUT
     D3 --> OUT
     T2 --> OUT
 ```
+
+Models load on first use, so each path pays only for what it touches.
 
 ## The prefilter
 
@@ -75,10 +86,8 @@ a species query never touches an image with no animal in it:
 SELECT file_name, file_path FROM gallery_meta WHERE has_animal = 1;
 ```
 
-The flags come from *class-agnostic* detectors, which is what makes them durable:
-MegaDetector answers "is there an animal", not "which species". Swapping the
-recogniser — as this project did, from MobileNetV3 to CLIP — requires no
-re-indexing at all.
+The flags come from *class-agnostic* detectors and a generic food gate, which is what
+makes them durable: MegaDetector answers "is there an animal", not "which species".
 
 ## Models
 
@@ -86,22 +95,28 @@ re-indexing at all.
 |:--|:--|:--|:--|
 | InsightFace `buffalo_l` | index + face query | FP32 (ONNX) | 512-d unit vector |
 | MegaDetector v5a | index | FP32 | boxes, class 0 = animal |
-| RT-DETR-X | index + food query | FP32 | boxes, COCO classes |
-| CLIP ViT-L/14 | index + 3 query paths | FP16 on CUDA | 768-d unit vector |
+| RT-DETR-X | index | FP32 | boxes, COCO classes |
+| ConvNeXt Tiny | index | FP32 | ImageNet top 5 per animal crop |
+| SigLIP so400m (default) | index + 3 query paths | FP16 on CUDA | 1152-d unit vector |
 
 None are fine-tuned. The engineering is in the combination, the index and the
-decision rules — not in training.
+decision rules, not in training.
 
 ## Schema
 
+Version 3. Older indexes are upgraded in place; a newer one is refused.
+
 ```sql
-gallery_meta(file_name PK, file_path, content_hash, file_size,
-             has_face, has_animal, has_food)
-face_embeddings(file_name, bbox, embedding, PRIMARY KEY (file_name, bbox))
-clip_embeddings(file_name PK, embedding)
-animal_boxes(file_name, bbox, confidence, PRIMARY KEY (file_name, bbox))
+schema_meta(key PK, value)      -- version, embedding model, classifier vocabulary
+gallery_meta(file_name PK, file_path, content_hash, file_size, mtime_ns, index_scale,
+             has_face, has_animal, has_food,
+             food_by_detector, food_by_vlm, food_vlm_score)
+face_embeddings(file_name, bbox, embedding, PK (file_name, bbox))
+clip_embeddings(file_name, region, embedding, PK (file_name, region))
+animal_boxes(file_name, bbox, confidence, PK (file_name, bbox))
+animal_predictions(file_name, bbox, class_id, probability, PK (file_name, bbox, class_id))
+food_boxes(file_name, bbox, confidence, class_id, PK (file_name, bbox))
 ```
 
-`face_embeddings` originally had no primary key, so every re-index duplicated
-every face. `(file_name, bbox)` is the natural key: idempotent per face, while
-still keeping two distinct faces in one photo.
+`file_name` is the gallery-relative path. For a flat gallery that is the bare name older
+versions stored, so existing rows stay valid.

@@ -1,45 +1,67 @@
 """Index-time orchestration.
 
-Restores the engineering the standalone face notebook had and the unified
-pipeline dropped:
+What this module guarantees, each pinned by a test in ``tests/test_pipeline.py``:
 
-* an 8-thread prefetch, so image decode overlaps GPU inference instead of
-  serialising in front of it;
-* a pre-resize cap, because a 6000 px press photo costs decode and transfer time
-  for detail no detector at 640 px input will ever see;
-* periodic commits, so an interrupted run over a large archive keeps its work.
-
-It also replaces filename-only change detection with a content hash, so an
-edited photo is re-indexed rather than skipped for having a familiar name.
+* **Bounded memory.** Decoding runs on a thread pool, ahead of inference by a
+  fixed window. ``Executor.map`` submits everything at once, which on an archive
+  of tens of thousands decoded the whole gallery into RAM before the first image
+  was processed.
+* **Batched inference (P6-2).** Detectors that can batch and the vision-language
+  encoder receive whole batches.
+* **Per-image atomicity.** All rows for one image land together or not at all, so
+  a failure cannot leave a row whose hash says "done" with no embeddings behind it.
+* **Failure isolation.** A batch that fails is retried one image at a time, so a
+  single bad file costs itself rather than its seven neighbours.
+* **Resumability.** Periodic commits keep work across an interruption.
+* **Incremental runs.** Unchanged files are skipped without re-reading them.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Sequence
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from vie.config import Config
 from vie.database import Index, content_hash
-from vie.indexing import BoxDetector, FaceDetector, analyse_image
+from vie.geometry import pad_box
+from vie.indexing import BoxDetector, FaceDetector, ImageAnalysis, analyse_batch
 from vie.logging_setup import get_logger
+from vie.quality import crop_regions
 
 log = get_logger("pipeline")
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
 
-def discover_images(root: str | Path) -> list[Path]:
-    """List gallery images, case-insensitively.
+def discover_images(root: str | Path, recursive: bool = True) -> list[Path]:
+    """List gallery images, case-insensitively, skipping hidden directories.
 
-    The standalone module globbed lowercase patterns only, so ``.JPG`` files —
-    the default from most cameras and agency exports — were silently invisible.
+    The standalone module globbed lowercase patterns only, so ``.JPG`` files, the
+    default from most cameras and agency exports, were silently invisible.
     """
     root = Path(root)
     if not root.is_dir():
         raise FileNotFoundError(f"gallery not found: {root}")
-    return sorted(p for p in root.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
+    walker = root.rglob("*") if recursive else root.iterdir()
+    return sorted(
+        p for p in walker
+        if p.suffix.lower() in IMAGE_SUFFIXES
+        and p.is_file()
+        and not any(part.startswith(".") for part in p.relative_to(root).parts)
+    )
+
+
+def gallery_key(path: Path, root: Path) -> str:
+    """The index key for a file: its gallery-relative POSIX path.
+
+    A bare file name collides as soon as two folders both hold ``IMG_0001.JPG``,
+    and the second image would silently overwrite the first.
+    """
+    return path.relative_to(root).as_posix()
 
 
 @dataclass
@@ -61,14 +83,195 @@ def _prefetch(
     paths: Sequence[Path],
     loader: Callable[[Path], object | None],
     workers: int,
+    window: int | None = None,
 ) -> Iterator[tuple[Path, object | None]]:
-    """Decode images on a thread pool, yielding in submission order."""
+    """Decode on a thread pool, yielding in order, holding at most ``window`` results."""
     if workers <= 1:
         for path in paths:
             yield path, loader(path)
         return
+
+    limit = window or workers * 2
+    pending: deque = deque()
+    source = iter(paths)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        yield from zip(paths, pool.map(loader, paths), strict=True)
+        for path in source:
+            pending.append((path, pool.submit(loader, path)))
+            if len(pending) >= limit:
+                ready_path, future = pending.popleft()
+                yield ready_path, future.result()
+        while pending:
+            ready_path, future = pending.popleft()
+            yield ready_path, future.result()
+
+
+def _chunked(items: Iterable[Any], size: int) -> Iterator[list[Any]]:
+    chunk: list[Any] = []
+    for item in items:
+        chunk.append(item)
+        if len(chunk) >= size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
+
+
+def _split_scale(decoded: Any) -> tuple[Any, float]:
+    """A loader returns the image, or ``(image, scale)`` when it resized."""
+    return decoded if isinstance(decoded, tuple) else (decoded, 1.0)
+
+
+@dataclass
+class _Item:
+    path: Path
+    key: str
+    digest: str
+    image: Any
+    scale: float
+    size: tuple[int, int]
+
+
+@dataclass
+class _Components:
+    size_of: Callable[[Any], tuple[int, int]]
+    face_detector: FaceDetector
+    animal_detector: BoxDetector
+    food_detector: BoxDetector
+    embed_image: Callable[[Any], Any] | None
+    embed_batch: Callable[[Sequence[Any], Sequence[Any]], list[list[tuple[str, Any]]]] | None
+    food_gate: Callable[[Any], list[float]] | None
+    classify_crops: Callable[[Sequence[Any], int], list[list[tuple[int, float]]]] | None
+    crop: Callable[[Any, Any], Any] | None
+
+
+def _embed(items: list[_Item], config: Config, parts: _Components) -> list[list[tuple[str, Any]]]:
+    if parts.embed_batch is not None:
+        layout = config.crop_layout if config.multi_crop else "1"
+        regions = [crop_regions(*item.size, layout) for item in items]
+        return parts.embed_batch([item.image for item in items], regions)
+    return [[("whole", parts.embed_image(item.image))] for item in items]
+
+
+def _food_gate_scores(
+    vectors: list[list[tuple[str, Any]]], config: Config, parts: _Components
+) -> list[float]:
+    """Score the stored whole-image vectors, costing no extra image inference."""
+    if parts.food_gate is None or not config.food.clip_gate_enabled:
+        return [0.0] * len(vectors)
+    import numpy as np
+
+    whole = np.vstack([dict(regions)["whole"] for regions in vectors])
+    return list(parts.food_gate(whole))
+
+
+def _classify_animals(
+    items: list[_Item], analyses: list[ImageAnalysis], config: Config, parts: _Components
+) -> list[list[tuple[Any, int, float]]]:
+    """Classify every animal crop once, so in-vocabulary queries need no model."""
+    results: list[list[tuple[Any, int, float]]] = [[] for _ in items]
+    if parts.classify_crops is None or parts.crop is None:
+        return results
+
+    crops: list[Any] = []
+    owners: list[tuple[int, Any]] = []
+    for position, (item, analysis) in enumerate(zip(items, analyses, strict=True)):
+        width, height = item.size
+        for box, _ in analysis.animal_boxes:
+            padded = pad_box(box, width, height, ratio=config.animal.padding_ratio)
+            patch = parts.crop(item.image, padded)
+            if patch is not None:
+                crops.append(patch)
+                owners.append((position, box))
+    if not crops:
+        return results
+
+    predictions = parts.classify_crops(crops, config.animal.classifier_top_k)
+    for (position, box), top in zip(owners, predictions, strict=True):
+        results[position].extend((box, class_id, prob) for class_id, prob in top)
+    return results
+
+
+def _write(
+    index: Index,
+    conn: Any,
+    item: _Item,
+    analysis: ImageAnalysis,
+    regions: list[tuple[str, Any]],
+    gate: float,
+    predictions: list[tuple[Any, int, float]],
+    config: Config,
+    gate_enabled: bool,
+) -> None:
+    food_by_vlm = gate_enabled and gate >= config.food.clip_gate_threshold
+    stat = item.path.stat()
+    with index.image_transaction(conn):
+        # Re-indexing an edited file must not leave its old rows behind.
+        index.clear_derived(conn, item.key)
+        index.upsert_image(
+            conn,
+            file_name=item.key,
+            file_path=str(item.path),
+            hash_=item.digest,
+            size=stat.st_size,
+            has_face=analysis.has_face,
+            has_animal=analysis.has_animal,
+            has_food=analysis.has_food or food_by_vlm,
+            food_by_detector=analysis.has_food,
+            food_by_vlm=food_by_vlm,
+            food_vlm_score=gate,
+            index_scale=item.scale,
+            mtime_ns=stat.st_mtime_ns,
+        )
+        for box, embedding in analysis.faces:
+            index.add_face(conn, item.key, box, embedding)
+        for box, confidence in analysis.animal_boxes:
+            index.add_animal_box(conn, item.key, box, confidence)
+        for box, class_id, probability in predictions:
+            index.add_animal_prediction(conn, item.key, box, class_id, probability)
+        for box, confidence, class_id in analysis.food_detections:
+            index.add_food_box(conn, item.key, box, confidence, class_id)
+        for name, vector in regions:
+            index.add_clip(conn, item.key, vector, region=name)
+
+
+def _index_batch(
+    items: list[_Item], index: Index, conn: Any, config: Config, parts: _Components,
+    stats: IndexStats, on_progress: Callable[[IndexStats], None] | None,
+) -> None:
+    try:
+        analyses = analyse_batch(
+            [item.image for item in items], config,
+            face_detector=parts.face_detector,
+            animal_detector=parts.animal_detector,
+            food_detector=parts.food_detector,
+        )
+        vectors = _embed(items, config, parts)
+        gates = _food_gate_scores(vectors, config, parts)
+        predictions = _classify_animals(items, analyses, config, parts)
+    except Exception:
+        if len(items) > 1:
+            log.warning("batch of %d failed; retrying one at a time", len(items))
+            for item in items:
+                _index_batch([item], index, conn, config, parts, stats, on_progress)
+            return
+        # One unreadable file must not abandon the whole archive, but it must be
+        # visible: the original swallowed failures silently.
+        log.exception("failed to index %s", items[0].key)
+        stats.failed += 1
+        return
+
+    gate_enabled = parts.food_gate is not None and config.food.clip_gate_enabled
+    for item, analysis, regions, gate, found in zip(
+        items, analyses, vectors, gates, predictions, strict=True
+    ):
+        try:
+            _write(index, conn, item, analysis, regions, gate, found, config, gate_enabled)
+            stats.indexed += 1
+        except Exception:
+            log.exception("failed to store %s", item.key)
+            stats.failed += 1
+    if on_progress is not None:
+        on_progress(stats)
 
 
 def build_index(
@@ -79,38 +282,79 @@ def build_index(
     face_detector: FaceDetector,
     animal_detector: BoxDetector,
     food_detector: BoxDetector,
-    embed_image: Callable[[object], object],
-    workers: int = 8,
-    commit_every: int = 50,
+    embed_image: Callable[[object], object] | None = None,
+    embed_batch: Callable[[Sequence[Any], Sequence[Any]], list[list[tuple[str, Any]]]]
+    | None = None,
+    food_gate: Callable[[Any], list[float]] | None = None,
+    classify_crops: Callable[[Sequence[Any], int], list[list[tuple[int, float]]]] | None = None,
+    crop: Callable[[Any, Any], Any] | None = None,
+    class_names: Callable[[], list[str]] | None = None,
+    workers: int | None = None,
+    batch_size: int | None = None,
+    commit_every: int | None = None,
     prune: bool = True,
+    rebuild: bool = False,
+    rehash: bool = False,
+    on_progress: Callable[[IndexStats], None] | None = None,
 ) -> IndexStats:
     """Index every changed image in the gallery.
 
     All model access is injected, which keeps this function testable end to end
-    without a GPU — the orchestration logic is what carries the risk here, not
-    the model calls.
+    without a GPU: the orchestration logic is what carries the risk here, not the
+    model calls.
     """
+    if embed_image is None and embed_batch is None:
+        raise ValueError("build_index needs embed_batch or embed_image")
+
+    settings = config.indexing
+    workers = settings.workers if workers is None else workers
+    batch_size = settings.batch_size if batch_size is None else batch_size
+    commit_every = settings.commit_every if commit_every is None else commit_every
+
     stats = IndexStats()
     index = Index(config.database_path)
     index.initialise()
 
-    paths = discover_images(config.gallery_path)
+    root = Path(config.gallery_path)
+    paths = discover_images(root, recursive=settings.recursive)
     stats.scanned = len(paths)
-    log.info("found %d images in %s", len(paths), config.gallery_path)
+    log.info("found %d images in %s", len(paths), root)
+    keys = {path: gallery_key(path, root) for path in paths}
+
+    parts = _Components(
+        size_of, face_detector, animal_detector, food_detector,
+        embed_image, embed_batch, food_gate, classify_crops, crop,
+    )
 
     with index.connect() as conn:
+        if rebuild:
+            index.clear_all(conn)
+            log.info("rebuild requested: cleared the index")
+        index.bind_embedding_model(conn, config.models["vision_language"])
+
         if prune:
-            stats.pruned = index.prune_missing(conn, {p.name for p in paths})
+            stats.pruned = index.prune_missing(conn, set(keys.values()))
             if stats.pruned:
                 log.info("pruned %d rows for files no longer on disk", stats.pruned)
 
+        known = index.known_files(conn)
+        trust_mtime = settings.trust_mtime and not rehash
         pending: list[tuple[Path, str]] = []
         for path in paths:
-            digest = content_hash(path)
-            if index.needs_indexing(conn, path.name, digest):
-                pending.append((path, digest))
-            else:
+            key = keys[path]
+            stat = path.stat()
+            seen = known.get(key)
+            if (
+                trust_mtime and seen is not None
+                and seen[1] == stat.st_size and seen[2] == stat.st_mtime_ns
+            ):
                 stats.skipped += 1
+                continue
+            digest = content_hash(path)
+            if seen is not None and seen[0] == digest:
+                stats.skipped += 1
+                continue
+            pending.append((path, digest))
 
         if not pending:
             log.info("index is up to date (%s)", stats.summary())
@@ -119,48 +363,26 @@ def build_index(
         log.info("indexing %d new or changed images", len(pending))
         digests = dict(pending)
 
-        for path, image in _prefetch([p for p, _ in pending], loader, workers):
-            if image is None:
-                log.warning("could not decode %s", path.name)
-                stats.failed += 1
-                continue
-            try:
-                analysis = analyse_image(
-                    image,
-                    size_of(image),
-                    config,
-                    face_detector=face_detector,
-                    animal_detector=animal_detector,
-                    food_detector=food_detector,
-                )
+        if classify_crops is not None and class_names is not None:
+            index.set_classifier_vocabulary(conn, config.animal.classifier, class_names())
 
-                # Re-indexing an edited file must not leave its old rows behind.
-                index.clear_derived(conn, path.name)
-                index.upsert_image(
-                    conn,
-                    file_name=path.name,
-                    file_path=str(path),
-                    hash_=digests[path],
-                    size=path.stat().st_size,
-                    has_face=analysis.has_face,
-                    has_animal=analysis.has_animal,
-                    has_food=analysis.has_food,
-                )
-                for box, embedding in analysis.faces:
-                    index.add_face(conn, path.name, box, embedding)
-                for box, confidence in analysis.animal_boxes:
-                    index.add_animal_box(conn, path.name, box, confidence)
-                index.add_clip(conn, path.name, embed_image(image))
+        def decoded_items() -> Iterator[_Item]:
+            window = max(workers * 2, batch_size * 2)
+            for path, decoded in _prefetch([p for p, _ in pending], loader, workers, window):
+                if decoded is None:
+                    log.warning("could not decode %s", keys[path])
+                    stats.failed += 1
+                    continue
+                image, scale = _split_scale(decoded)
+                yield _Item(path, keys[path], digests[path], image, scale, size_of(image))
 
-                stats.indexed += 1
-                if stats.indexed % commit_every == 0:
-                    conn.commit()  # checkpoint: an interruption keeps this much
-                    log.info("checkpoint at %d images", stats.indexed)
-            except Exception:
-                # One unreadable file must not abandon the whole archive, but it
-                # must be visible — the original swallowed failures silently.
-                log.exception("failed to index %s", path.name)
-                stats.failed += 1
+        last_commit = 0
+        for batch in _chunked(decoded_items(), max(1, batch_size)):
+            _index_batch(batch, index, conn, config, parts, stats, on_progress)
+            if stats.indexed - last_commit >= commit_every:
+                conn.commit()  # checkpoint: an interruption keeps this much
+                last_commit = stats.indexed
+                log.info("checkpoint at %d images", stats.indexed)
 
     log.info("indexing complete (%s)", stats.summary())
     return stats

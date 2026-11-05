@@ -55,6 +55,14 @@ class Match:
     score: float
     box: tuple[int, int, int, int] | None = None
     label: str | None = None
+    #: What a reader should see, when it differs from the ranking key. ``score``
+    #: for free text is a raw cosine (0.23 is a healthy hit); this is its
+    #: calibrated reading.
+    confidence: float | None = None
+
+    @property
+    def display_score(self) -> float:
+        return self.score if self.confidence is None else self.confidence
 
 
 def best_per_image(matches: list[Match]) -> list[Match]:

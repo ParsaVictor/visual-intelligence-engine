@@ -1,0 +1,18 @@
+# Keep biometric data and bulky artefacts out of the build context entirely, so
+# they cannot end up in an image layer even by accident.
+data/
+gallery/
+*.db
+*.sqlite*
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.faiss
+.git/
+.venv/
+**/__pycache__/
+notebooks/
+assets/
+docs/
+tests/

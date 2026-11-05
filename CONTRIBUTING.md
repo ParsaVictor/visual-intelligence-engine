@@ -40,7 +40,7 @@ they carry a comment explaining what went wrong. Keep that habit.
   `FaceDetector`, `BoxDetector` or `CropScorer` — never on torch directly.
   Everything model-specific lives in `vie/adapters.py`. This is what keeps the
   decision rules testable without a GPU.
-- **New behaviour goes in `configs/default.yaml`**, not into a new CLI flag, and
+- **New behaviour goes in `src/vie/default.yaml`**, not into a new CLI flag, and
   if it has an invariant, encode it in `Config.validate()`.
 - **No silent degradation.** A bare `except` that swallows a failure is how the
   original could return empty results forever without saying why. Log it or

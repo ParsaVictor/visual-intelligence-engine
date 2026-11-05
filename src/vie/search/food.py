@@ -23,7 +23,8 @@ from typing import Protocol
 
 from vie.config import Config
 from vie.geometry import Box, is_large_enough, pad_box
-from vie.scoring import Match, best_per_image, contrastive_score
+from vie.scoring import Match, best_per_image
+from vie.vlm import hypothesis_score
 
 
 class CropScorer(Protocol):
@@ -93,7 +94,7 @@ def rank(
 
     matches: list[Match] = []
     for candidate, row in zip(candidates, logits, strict=True):
-        score = contrastive_score(list(row))
+        score = hypothesis_score(list(row), config.score_mode)
         if score < config.food.match_threshold:
             continue
         matches.append(

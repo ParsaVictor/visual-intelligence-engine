@@ -31,11 +31,12 @@ def configure_cache(cache_dir: str | Path | None) -> Path | None:
     for sub in (hf, hub):
         sub.mkdir(parents=True, exist_ok=True)
 
-    # HuggingFace (transformers + hub downloads)
+    # HuggingFace (transformers + hub downloads). HF_HOME alone covers both, and
+    # the older TRANSFORMERS_CACHE now only produces a deprecation warning.
     os.environ["HF_HOME"] = str(hf)
     os.environ["HUGGINGFACE_HUB_CACHE"] = str(hf / "hub")
-    os.environ["TRANSFORMERS_CACHE"] = str(hf / "transformers")
-    # torch.hub (MegaDetector / yolov5)
+    # torch.hub (MegaDetector / yolov5) and torchvision classifier weights
     os.environ["TORCH_HOME"] = str(hub)
+    # InsightFace and the detector weights are routed by ModelBundle.
 
     return root

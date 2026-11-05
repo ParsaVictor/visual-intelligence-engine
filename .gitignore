@@ -11,6 +11,18 @@ my_gallery/
 *.sqlite
 *.sqlite3
 
+# Footage can show identifiable people just as photographs do
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.m4v
+
+# Generated reports embed thumbnails of the gallery and of faces
+benchmarks/
+*.report.html
+
 # Model weights (downloaded at runtime, hundreds of MB)
 *.pt
 *.pth
