@@ -148,13 +148,15 @@ workflow, real weights, 14 labelled queries over 92 public photos):
 |:--|--:|--:|
 | English query, mAP | 1.000 | 1.000 |
 | Persian query, mAP | 0.738 | **0.945** |
-| Food precision / recall, at each model's thresholds | 0.89 / 1.00 | **0.94 / 0.98** |
-| Unknown-species precision / recall | 0.95 / 1.00 | 0.95 / 1.00 |
+| Food precision / recall, at each model's thresholds | 0.89 / 1.00 | 0.90–0.94 / 0.98–1.00 |
+| Unknown-species precision / recall | 0.95 / 1.00 | 0.95 / 0.95–1.00 |
 | Best right image of a present concept, calibrated probability (worst case) | 0.023 | 0.009 |
 | Best image of an absent concept (median of 8) | 0.00002 | 0.00001 |
 
 The last two rows set `text.min_probability: 0.001`: a concept that is not in the archive
-returns nothing rather than its least-bad five. The English set is too easy to separate the
+returns nothing rather than its least-bad five. SigLIP 2 ranges are over two calibration
+runs whose samples differed slightly (44 and 48 dish images): on food and species the two
+models are level within that noise, and Persian is where SigLIP 2 is clearly ahead. The English set is too easy to separate the
 models or to show what averaging phrasings adds; both score 1.0 either way. Results in
 [`results/search_eval.json`](results/search_eval.json).
 

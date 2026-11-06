@@ -25,7 +25,8 @@ measure both choices with the real weights.
 
 **Measured defaults.** SigLIP 2 is the default vision-language model: equal on English
 queries (mAP 1.0 both), 0.945 against 0.738 on Persian, and with thresholds calibrated
-for it (`model_overrides`, food 0.92, species 0.84) food precision 0.94 against 0.89.
+for it (`model_overrides`, food 0.92, species 0.84) level with SigLIP on food and species
+(precision 0.90–0.94 against 0.89 over two runs; species 0.95 both).
 Each model's thresholds follow it automatically, and a threshold set explicitly still
 wins. A Persian query is encoded as typed, since wrapping it in phrasings never helped.
 `text.min_probability: 0.001` lets an absent concept return nothing. Changing the model

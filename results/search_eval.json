@@ -100,5 +100,23 @@
       }
     }
   },
-  "calibration_run": "Search quality workflow, run 42241763687, scripts/calibrate.py"
+  "calibration_run": "Search quality workflow, run 42241763687, scripts/calibrate.py",
+  "confirmation_run": {
+    "run": 42245151851,
+    "note": "same thresholds, sample of 44 dish images instead of 48",
+    "google/siglip2-so400m-patch14-384": {
+      "food (0.92)": {
+        "precision": 0.898,
+        "recall": 1.0
+      },
+      "animal (0.84)": {
+        "precision": 0.95,
+        "recall": 0.95
+      },
+      "food gate (-1.0)": {
+        "precision": 0.9565,
+        "recall": 1.0
+      }
+    }
+  }
 }
