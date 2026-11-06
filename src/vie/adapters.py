@@ -23,6 +23,41 @@ from vie.quality import is_usable_face
 log = get_logger("adapters")
 
 
+def face_vectors(app: Any, image: Any, faces: Sequence[Any], flip: bool) -> list[Any]:
+    """Unit identity vectors for detected faces, optionally mirror-averaged.
+
+    InsightFace has already embedded each face as seen. With ``flip`` the aligned
+    crop is mirrored and embedded once more, in one batch for the whole image, and
+    the two raw vectors are summed before normalising. A face seen at an angle
+    then carries evidence from both of its sides, which is where single-view
+    embeddings lose the most (see scripts/face_benchmark.py).
+    """
+    import numpy as np
+
+    if not faces:
+        return []
+    recogniser = getattr(app, "models", {}).get("recognition")
+    if (not flip or recogniser is None
+            or any(getattr(face, "kps", None) is None for face in faces)):
+        return [face.normed_embedding for face in faces]
+
+    from insightface.utils import face_align
+
+    size = recogniser.input_size[0]
+    mirrored = [
+        np.ascontiguousarray(
+            face_align.norm_crop(image, landmark=face.kps, image_size=size)[:, ::-1]
+        )
+        for face in faces
+    ]
+    extra = np.asarray(recogniser.get_feat(mirrored), dtype=np.float32).reshape(len(faces), -1)
+    out = []
+    for face, other in zip(faces, extra, strict=True):
+        vector = np.asarray(face.embedding, dtype=np.float32).ravel() + other
+        out.append(vector / max(float(np.linalg.norm(vector)), 1e-12))
+    return out
+
+
 class InsightFaceDetector:
     """InsightFace ``buffalo_l``: RetinaFace detection + ArcFace embeddings.
 
@@ -38,18 +73,20 @@ class InsightFaceDetector:
         self.rejected = 0
 
     def detect(self, image: Any) -> list[tuple[Box, Any]]:
-        out: list[tuple[Box, Any]] = []
-        for face in self.bundle.face_app.get(image):
+        app = self.bundle.face_app
+        kept: list[tuple[Box, Any]] = []
+        for face in app.get(image):
             box = tuple(int(v) for v in face.bbox[:4])
             score = float(getattr(face, "det_score", 1.0))
             if not is_usable_face(score, box, self.config.face.min_det_score,
                                   self.config.face.min_face_px):
                 self.rejected += 1
                 continue
-            # normed_embedding is unit length, which is what makes a dot
-            # product equal cosine similarity downstream.
-            out.append((box, face.normed_embedding))
-        return out
+            kept.append((box, face))
+        # Unit length either way, which is what makes a dot product equal cosine
+        # similarity downstream.
+        vectors = face_vectors(app, image, [f for _, f in kept], self.config.face.flip_tta)
+        return [(box, vector) for (box, _), vector in zip(kept, vectors, strict=True)]
 
 
 class MegaDetectorAdapter:

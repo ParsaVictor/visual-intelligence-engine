@@ -75,6 +75,11 @@ face:
   small_image_px: 400
   # Image cap, in pixels, applied to the longest side before any model runs.
   max_index_dimension: 1600
+  # Embed every face twice, as seen and mirrored, and average. Borrowed from
+  # student-face-gate, where it was measured on LFW; re-measured here for ArcFace
+  # in scripts/face_benchmark.py. Costs one extra 112x112 recognition pass per
+  # face, which is small next to detection. Changing it: `vie index --rebuild`.
+  flip_tta: true
 
 animal:
   # MegaDetector v5a raw YOLOv5 head: 0=animal, 1=person, 2=vehicle.

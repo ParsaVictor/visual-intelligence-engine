@@ -90,32 +90,56 @@ def query_face_embedding(image_path: Any, config: Config, bundle: Any) -> Any:
     app = bundle.face_app
     ctx = 0 if bundle.runtime.is_cuda else -1
 
-    def detect() -> list[tuple[Any, Any]]:
-        return [(tuple(int(v) for v in f.bbox[:4]), f.normed_embedding) for f in app.get(image)]
+    from vie.adapters import face_vectors
 
-    app.prepare(ctx_id=ctx, det_size=face_search.detection_size(width, height, config))
-    faces = detect()
-    if not faces:
-        # Retry once at full detection size: small or tightly cropped portraits
-        # are the common failure and this recovers most of them.
-        app.prepare(ctx_id=ctx, det_size=(config.face.det_size_large, config.face.det_size_large))
+    def detect() -> list[tuple[Any, Any]]:
+        found = list(app.get(image))
+        if not found:
+            return []
+        # Only the subject needs the mirrored pass, not every bystander.
+        subject = max(found, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+        vector = face_vectors(app, image, [subject], config.face.flip_tta)[0]
+        return [(tuple(int(v) for v in subject.bbox[:4]), vector)]
+
+    try:
+        app.prepare(ctx_id=ctx, det_size=face_search.detection_size(width, height, config))
         faces = detect()
+        if not faces:
+            # Retry once at full detection size: small or tightly cropped portraits
+            # are the common failure and this recovers most of them.
+            size = config.face.det_size_large
+            app.prepare(ctx_id=ctx, det_size=(size, size))
+            faces = detect()
+    finally:
+        # The bundle is shared with indexing and video, which expect the large size.
+        size = config.face.det_size_large
+        app.prepare(ctx_id=ctx, det_size=(size, size))
     if not faces:
-        raise ValueError("no face detected in the query image")
+        raise ValueError(f"no face detected in the query image {Path(image_path).name}")
     return face_search.select_query_face(faces)[1]
 
 
+def query_images(value: Any) -> list[Path]:
+    """``--image`` may be given once or several times."""
+    if value is None:
+        return []
+    items = value if isinstance(value, list | tuple) else [value]
+    return [Path(item) for item in items]
+
+
 def _search_face(args, config: Config, index: Index, load_runtime) -> list[Match]:
-    if args.image is None:
+    images = query_images(args.image)
+    if not images:
         raise ValueError("a face search needs a query image")
-    if not Path(args.image).is_file():
-        raise FileNotFoundError(f"query image not found: {args.image}")
+    for image in images:
+        if not image.is_file():
+            raise FileNotFoundError(f"query image not found: {image}")
 
     bundle, _, _ = load_runtime(config)
-    embedding = query_face_embedding(args.image, config, bundle)
+    embeddings = [query_face_embedding(image, config, bundle) for image in images]
     with index.connect() as conn:
         catalog = VectorCatalog.open(conn, "face_embeddings", config.search, _ann_cache(config))
-        return face_search.rank_catalog(embedding, catalog, _file_paths(conn), config)
+        return face_search.rank_catalog_multi(embeddings, catalog, _file_paths(conn), config)
 
 
 # ── free text ──────────────────────────────────────────────────────────

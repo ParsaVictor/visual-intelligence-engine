@@ -47,6 +47,14 @@ class FaceConfig:
     det_size_small: int
     small_image_px: int
     max_index_dimension: int
+    # Embed each face and its mirror image and average the two. Measured in
+    # scripts/face_benchmark.py; costs one extra recognition pass per face.
+    flip_tta: bool = True
+
+    @property
+    def recipe(self) -> str:
+        """What produced the stored face vectors, so a change can be noticed."""
+        return "arcface" + ("+flip" if self.flip_tta else "")
 
 
 @dataclass(frozen=True)

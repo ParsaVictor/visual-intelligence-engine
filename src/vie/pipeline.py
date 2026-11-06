@@ -274,6 +274,19 @@ def _index_batch(
         on_progress(stats)
 
 
+def _stale_face_images(index: Index, conn: Any, config: Config) -> set[str]:
+    """Images whose face vectors came from a different recipe than the config's.
+
+    Mixing recipes in one index would quietly shift every score, so those images
+    are re-indexed. Only images that have faces pay for it, not the whole archive.
+    An index written before the recipe was recorded used plain ArcFace.
+    """
+    found = index.get_meta(conn, "face_recipe") or "arcface"
+    if found == config.face.recipe:
+        return set()
+    return {row[0] for row in conn.execute("SELECT file_name FROM gallery_meta WHERE has_face = 1")}
+
+
 def build_index(
     config: Config,
     *,
@@ -338,12 +351,19 @@ def build_index(
                 log.info("pruned %d rows for files no longer on disk", stats.pruned)
 
         known = index.known_files(conn)
+        stale_faces = _stale_face_images(index, conn, config)
+        if stale_faces:
+            log.info("face recipe changed to %s: re-indexing the %d images with faces",
+                     config.face.recipe, len(stale_faces))
         trust_mtime = settings.trust_mtime and not rehash
         pending: list[tuple[Path, str]] = []
         for path in paths:
             key = keys[path]
             stat = path.stat()
             seen = known.get(key)
+            if key in stale_faces:
+                pending.append((path, content_hash(path)))
+                continue
             if (
                 trust_mtime and seen is not None
                 and seen[1] == stat.st_size and seen[2] == stat.st_mtime_ns
@@ -357,6 +377,7 @@ def build_index(
             pending.append((path, digest))
 
         if not pending:
+            index.set_meta(conn, "face_recipe", config.face.recipe)
             log.info("index is up to date (%s)", stats.summary())
             return stats
 
@@ -383,6 +404,9 @@ def build_index(
                 conn.commit()  # checkpoint: an interruption keeps this much
                 last_commit = stats.indexed
                 log.info("checkpoint at %d images", stats.indexed)
+        # Recorded only once every stale image was redone, so an interrupted run
+        # picks the rest up next time.
+        index.set_meta(conn, "face_recipe", config.face.recipe)
 
     log.info("indexing complete (%s)", stats.summary())
     return stats
