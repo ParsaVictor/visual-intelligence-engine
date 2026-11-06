@@ -200,11 +200,18 @@ def _search_animal(args, config: Config, index: Index, load_runtime) -> list[Mat
                 log.info("no stored prediction cleared the floor; trying the open vocabulary")
         rows = index.candidates(conn, "has_animal")
         stored = index.animal_boxes(conn)
+        embedded = index.embedded_images(conn)
+        vectors = index.object_vectors(conn, "animal")
 
     log.info("%d candidate images after the has_animal prefilter", len(rows))
-    return _score_crops(
-        query, rows, stored, animal_search.select_crops, animal_search.rank_with_clip,
-        animal_search.Candidate, config, load_runtime,
+    fresh = [row for row in rows if row.file_name in embedded]
+    older = [row for row in rows if row.file_name not in embedded]
+    return best_per_image(
+        _score_stored(query, fresh, vectors, {}, "animal", animal_search.rank_with_clip,
+                      animal_search.Candidate, config, load_runtime)
+        + _score_crops(query, older, stored, animal_search.select_crops,
+                       animal_search.rank_with_clip, animal_search.Candidate, config,
+                       load_runtime)
     )
 
 
@@ -218,12 +225,88 @@ def _search_food(args, config: Config, index: Index, load_runtime) -> list[Match
     with index.connect() as conn:
         rows = index.candidates(conn, "has_food")
         stored = index.food_boxes(conn, config.food.search_classes)
+        embedded = index.embedded_images(conn)
+        vectors = index.object_vectors(conn, "food")
+        # For a gate-admitted image with no dish box above the search floor, the
+        # whole frame is scored instead, as the crop path does.
+        wholes = index.whole_vectors(conn, {r.file_name for r in rows if r.file_name in embedded})
 
     log.info("%d candidate images after the has_food prefilter", len(rows))
-    return _score_crops(
-        query, rows, stored, food_search.select_crops, food_search.rank,
-        food_search.Candidate, config, load_runtime, whole_frame_fallback=True,
+    fresh = [row for row in rows if row.file_name in embedded]
+    older = [row for row in rows if row.file_name not in embedded]
+    return best_per_image(
+        _score_stored(query, fresh, vectors, wholes, "food", food_search.rank,
+                      food_search.Candidate, config, load_runtime)
+        + _score_crops(query, older, stored, food_search.select_crops, food_search.rank,
+                       food_search.Candidate, config, load_runtime, whole_frame_fallback=True)
     )
+
+
+class _StoredVectors:
+    """A ``CropScorer`` over vectors computed at index time instead of over pixels.
+
+    The search paths' ranking functions take crops and a scorer; handing them stored
+    vectors and this scorer reuses their exact decision rule, while the work per
+    candidate drops from decoding an image and running the image tower to one dot
+    product per prompt.
+    """
+
+    def __init__(self, encoder: Any) -> None:
+        self.encoder = encoder
+
+    def score(self, vectors: list[Any], prompts: list[str]) -> list[list[float]]:
+        import numpy as np
+
+        if not vectors:
+            return []
+        texts = self.encoder.encode_texts(prompts)
+        return self.encoder.logits_from_similarity(np.vstack(vectors) @ texts.T).tolist()
+
+
+def _score_stored(
+    query: str,
+    rows: list[Any],
+    objects: dict[str, list[tuple[Any, Any, float, int | None, Any]]],
+    wholes: dict[str, Any],
+    kind: str,
+    rank: Any,
+    candidate_type: Any,
+    config: Config,
+    load_runtime: Any,
+) -> list[Match]:
+    """Score images indexed with object vectors: no image is opened.
+
+    The floors :func:`_score_crops` applies through ``select_crops`` are applied
+    here to the stored boxes: confidence at the search threshold, and for food only
+    the searchable classes. Size floors and padding were applied at index time.
+    """
+    if not rows:
+        return []
+    section = config.animal if kind == "animal" else config.food
+    searchable = set(config.food.search_classes) if kind == "food" else None
+    candidates: list[Any] = []
+    vectors: list[Any] = []
+    whole_frame: set[str] = set()
+    for row in rows:
+        kept = 0
+        for _, crop, confidence, class_id, vector in objects.get(row.file_name, []):
+            if confidence < section.search_confidence:
+                continue
+            if searchable is not None and class_id is not None and class_id not in searchable:
+                continue
+            candidates.append(candidate_type(row.file_name, row.file_path, crop, confidence))
+            vectors.append(vector)
+            kept += 1
+        if not kept and row.file_name in wholes:
+            candidates.append(candidate_type(row.file_name, row.file_path, (0, 0, 0, 0), 1.0))
+            vectors.append(wholes[row.file_name])
+            whole_frame.add(row.file_name)
+    if not candidates:
+        return []
+    _, scorer, _ = load_runtime(config)
+    matches = rank(query, candidates, vectors, _StoredVectors(scorer), config)
+    # A whole-frame match has no box worth drawing.
+    return [replace(m, box=None) if m.file_name in whole_frame else m for m in matches]
 
 
 def _score_crops(
@@ -248,6 +331,7 @@ def _score_crops(
 
     if not rows:
         return []
+    log.info("%d images indexed before object vectors; cropping them at query time", len(rows))
     _, scorer, _ = load_runtime(config)
     step = max(1, config.search.crop_batch)
 

@@ -331,3 +331,88 @@ def test_a_moved_gallery_keeps_its_index_and_points_at_the_new_place(
     with Index(cfg.database_path).connect() as conn:
         paths = {Path(p).parent for (p,) in conn.execute("SELECT file_path FROM gallery_meta")}
     assert paths == {moved}
+
+
+# ── food and unknown species are answered from stored vectors ─────────
+
+
+@pytest.fixture()
+def food_cfg(raw_config: dict, tmp_path: Path) -> Config:
+    root = tmp_path / "gallery"
+    write_png(root / "red.png", (230, 20, 20))
+    write_png(root / "green.png", (20, 230, 20))
+    write_png(root / "blue.png", (20, 20, 230))
+    raw = copy.deepcopy(raw_config)
+    raw["paths"] = {"gallery": str(root), "database": str(tmp_path / "index.db")}
+    return Config.from_dict(raw)
+
+
+def _no_pixels(monkeypatch) -> None:
+    import vie.adapters
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a query decoded an image")
+
+    monkeypatch.setattr(vie.adapters, "load_image", refuse)
+
+
+def test_object_vectors_are_stored_at_index_time(food_cfg) -> None:
+    FakeStack(food_cfg).index()
+    with Index(food_cfg.database_path).connect() as conn:
+        rows = conn.execute("SELECT file_name, kind FROM object_embeddings").fetchall()
+        flags = dict(conn.execute("SELECT file_name, objects_embedded FROM gallery_meta"))
+    assert rows == [("red.png", "animal")]  # the fake detector's one animal
+    assert set(flags.values()) == {1}
+
+
+@pytest.mark.parametrize(("kind", "query", "expected"), [
+    ("food", "kebab", ["green.png"]),          # gate-admitted, scored on its whole frame
+    ("animal", "red quokka", None),            # out of vocabulary: the vector path
+])
+def test_food_and_unknown_species_open_no_image(food_cfg, monkeypatch, kind, query,
+                                                expected) -> None:
+    from vie.query import run_search
+
+    stack = FakeStack(food_cfg)
+    stack.index()
+    reference = run_search(SimpleNamespace(kind=kind, query=query, image=None, top_k=None),
+                           food_cfg, stack.load_runtime)
+    _no_pixels(monkeypatch)
+    found = run_search(SimpleNamespace(kind=kind, query=query, image=None, top_k=None),
+                       food_cfg, stack.load_runtime)
+    assert [m.file_name for m in found] == [m.file_name for m in reference]
+    if expected is not None:
+        assert [m.file_name for m in found] == expected
+
+
+def test_an_older_index_is_still_served_by_cropping(food_cfg) -> None:
+    from vie.query import run_search
+
+    stack = FakeStack(food_cfg)
+    stack.index()
+    request = SimpleNamespace(kind="food", query="kebab", image=None, top_k=None)
+    new = run_search(request, food_cfg, stack.load_runtime)
+    with Index(food_cfg.database_path).connect() as conn:
+        conn.execute("UPDATE gallery_meta SET objects_embedded = 0")
+        conn.execute("DELETE FROM object_embeddings")
+    old = run_search(request, food_cfg, stack.load_runtime)
+    assert [m.file_name for m in old] == [m.file_name for m in new] == ["green.png"]
+    assert old[0].score == pytest.approx(new[0].score, abs=1e-5)
+
+
+def test_an_unknown_species_is_found_from_its_stored_vector(raw_config, tmp_path,
+                                                             monkeypatch) -> None:
+    from vie.query import run_search
+
+    write_png(tmp_path / "g" / "red.png", (230, 20, 20))
+    write_png(tmp_path / "g" / "blue.png", (20, 20, 230))
+    raw = copy.deepcopy(raw_config)
+    raw["paths"] = {"gallery": str(tmp_path / "g"), "database": str(tmp_path / "i.db")}
+    raw["animal"]["match_threshold"] = 0.5
+    config = Config.from_dict(raw)
+    stack = FakeStack(config)
+    stack.index()
+    _no_pixels(monkeypatch)
+    found = run_search(SimpleNamespace(kind="animal", query="red quokka", image=None,
+                                       top_k=None), config, stack.load_runtime)
+    assert [m.file_name for m in found] == ["red.png"] and found[0].box is not None

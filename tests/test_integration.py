@@ -260,7 +260,9 @@ def test_inference_is_batched(raw_config, tmp_path) -> None:
     stats = stack.index(batch_size=4)
     assert stats.indexed == 6
     assert stack.encoder.forward_passes == 2
-    assert stack.encoder.batch_sizes == [24, 12]  # four and two images, six crops each
+    # Four and two images, six scene crops each, plus the fake animal every red image
+    # holds: its object vector rides in the same forward pass, not a second one.
+    assert stack.encoder.batch_sizes == [28, 14]
     assert stack.food.batches == [4, 2]
 
 
