@@ -38,6 +38,32 @@ class ConfigError(ValueError):
     """Raised when a configuration is internally inconsistent."""
 
 
+def merge(base: dict, extra: dict) -> dict:
+    """Deep-merge ``extra`` over ``base`` without mutating either."""
+    import copy
+
+    out = copy.deepcopy(base)
+    for key, value in (extra or {}).items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = merge(out[key], value)
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
+
+
+def with_model_overrides(raw: dict[str, Any]) -> dict[str, Any]:
+    """Apply ``model_overrides[<selected model>]`` on top of the rest of the config.
+
+    Thresholds are on each model's own scale: SigLIP 2's logit margins run narrower
+    than SigLIP's, so the same number means a stricter cut. Each model's measured
+    thresholds live under its name and follow it automatically, so switching models
+    never silently keeps another model's thresholds.
+    """
+    model = (raw.get("models") or {}).get("vision_language", "")
+    override = (raw.get("model_overrides") or {}).get(model)
+    return merge(raw, override) if override else raw
+
+
 @dataclass(frozen=True)
 class FaceConfig:
     match_threshold: float
@@ -191,6 +217,7 @@ class Config:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Config:
+        raw = with_model_overrides(raw)
         return cls(
             raw=raw,
             face=FaceConfig(**raw["face"]),

@@ -23,6 +23,14 @@ explicit) and understands Persian. A query is averaged over several phrasings
 (`text.query_templates`). `scripts/eval_search.py` and the *Search quality* workflow
 measure both choices with the real weights.
 
+**Measured defaults.** SigLIP 2 is the default vision-language model: equal on English
+queries (mAP 1.0 both), 0.945 against 0.738 on Persian, and with thresholds calibrated
+for it (`model_overrides`, food 0.92, species 0.84) food precision 0.94 against 0.89.
+Each model's thresholds follow it automatically, and a threshold set explicitly still
+wins. A Persian query is encoded as typed, since wrapping it in phrasings never helped.
+`text.min_probability: 0.001` lets an absent concept return nothing. Changing the model
+means `vie index --rebuild`; the index refuses to mix models.
+
 **Video faces at a fixed cost per person.** Each person keeps up to four exemplar
 views (the most typical, then the least alike) and their on-screen intervals,
 instead of a vector for every sighting; face search returns all of a person's

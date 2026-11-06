@@ -21,7 +21,6 @@ Speed comes from not doing work twice:
 
 from __future__ import annotations
 
-import copy
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
@@ -31,22 +30,11 @@ from typing import Any
 
 import yaml
 
-from vie.config import DEFAULT_CONFIG_PATH, Config
+from vie.config import DEFAULT_CONFIG_PATH, Config, merge
 from vie.logging_setup import get_logger
 from vie.scoring import Match
 
 log = get_logger("api")
-
-
-def merge(base: dict, extra: dict) -> dict:
-    """Deep-merge ``extra`` over ``base`` without mutating either."""
-    out = copy.deepcopy(base)
-    for key, value in (extra or {}).items():
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = merge(out[key], value)
-        else:
-            out[key] = copy.deepcopy(value)
-    return out
 
 
 def load_config(overrides: dict | None = None, base: str | Path | None = None) -> Config:
@@ -54,7 +42,16 @@ def load_config(overrides: dict | None = None, base: str | Path | None = None) -
     path = Path(base) if base else DEFAULT_CONFIG_PATH
     with path.open("r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
-    config = Config.from_dict(merge(raw, overrides or {}))
+    raw = merge(raw, overrides or {})
+    # What the caller set explicitly wins over the selected model's thresholds:
+    # re-applying it as that model's override puts it last.
+    model = raw["models"]["vision_language"]
+    explicit = {k: v for k, v in (overrides or {}).items()
+                if k not in ("models", "model_overrides")}
+    if explicit:
+        raw.setdefault("model_overrides", {})
+        raw["model_overrides"][model] = merge(raw["model_overrides"].get(model) or {}, explicit)
+    config = Config.from_dict(raw)
     config.validate()
     return config
 

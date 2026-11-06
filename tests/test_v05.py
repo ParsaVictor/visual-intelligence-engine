@@ -485,3 +485,15 @@ def test_nothing_found_floor_hides_improbable_text_results(cfg, raw_config) -> N
     raw["text"]["min_probability"] = 0.999
     strict = Config.from_dict(raw)
     assert shown and run_search(request, strict, stack.load_runtime) == []
+
+
+def test_each_model_brings_its_own_thresholds_and_explicit_settings_win() -> None:
+    from vie.api import load_config
+
+    v2 = load_config({"models": {"vision_language": "google/siglip2-so400m-patch14-384"}})
+    v1 = load_config({"models": {"vision_language": "google/siglip-so400m-patch14-384"}})
+    assert (v2.food.match_threshold, v2.animal.match_threshold) == (0.92, 0.84)
+    assert (v1.food.match_threshold, v1.animal.match_threshold) == (0.98, 0.91)
+    mine = load_config({"models": {"vision_language": "google/siglip2-so400m-patch14-384"},
+                        "food": {"match_threshold": 0.95}})
+    assert mine.food.match_threshold == 0.95 and mine.animal.match_threshold == 0.84

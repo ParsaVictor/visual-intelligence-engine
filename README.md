@@ -141,6 +141,23 @@ searching with several photos of a person. This is a pose stress test on public 
 LFW; reproduce it with [`scripts/face_benchmark.py`](scripts/face_benchmark.py), results in
 [`results/face_benchmark.json`](results/face_benchmark.json).
 
+**Typed search, SigLIP vs SigLIP 2** (`scripts/eval_search.py` in the *Search quality*
+workflow, real weights, 14 labelled queries over 92 public photos):
+
+| | SigLIP so400m | **SigLIP 2 so400m (default)** |
+|:--|--:|--:|
+| English query, mAP | 1.000 | 1.000 |
+| Persian query, mAP | 0.738 | **0.945** |
+| Food precision / recall, at each model's thresholds | 0.89 / 1.00 | **0.94 / 0.98** |
+| Unknown-species precision / recall | 0.95 / 1.00 | 0.95 / 1.00 |
+| Best right image of a present concept, calibrated probability (worst case) | 0.023 | 0.009 |
+| Best image of an absent concept (median of 8) | 0.00002 | 0.00001 |
+
+The last two rows set `text.min_probability: 0.001`: a concept that is not in the archive
+returns nothing rather than its least-bad five. The English set is too easy to separate the
+models or to show what averaging phrasings adds; both score 1.0 either way. Results in
+[`results/search_eval.json`](results/search_eval.json).
+
 **Species and food.** Precision on 72 public labelled images with the default model, at 100% recall. The set is small and easy, so read this as a comparison between versions, not as expected accuracy on your archive.
 
 | Search | v0.2 | Now |
