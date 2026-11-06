@@ -250,7 +250,9 @@ def render_search_card(
     margin, gap = 56, 22
     side = 300 if query_images else 0
     grid_w = width - margin * 2 - (side + gap if side else 0)
-    columns = max(1, min(columns, len(shown) or 1))
+    # The column count stays fixed whatever the number of results, so a card with one
+    # match has the same tile size as a card with eight, not one tile the full width.
+    columns = max(1, columns)
     tile_w = (grid_w - gap * (columns - 1)) // columns
     tile_h = int(tile_w * 0.75)
     caption_h = 92
