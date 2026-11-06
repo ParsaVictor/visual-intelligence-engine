@@ -198,7 +198,12 @@ class ModelBundle:
             kwargs: dict[str, Any] = {}
             if self.cache_dir:
                 kwargs["root"] = str(self.cache_dir / "insightface")
-            app = FaceAnalysis(name=self.config.models["face_pack"], providers=providers, **kwargs)
+            # The pack also ships two landmark models and an age/gender model, which
+            # FaceAnalysis runs on every face by default. Nothing here reads their
+            # output; skipping them halved the time per face (1144 -> 527 ms on a
+            # four-face 1080p frame, CPU) with identical detections and embeddings.
+            app = FaceAnalysis(name=self.config.models["face_pack"], providers=providers,
+                               allowed_modules=["detection", "recognition"], **kwargs)
             size = self.config.face.det_size_large
             app.prepare(ctx_id=0 if runtime.is_cuda else -1, det_size=(size, size))
             log.info("loaded InsightFace %s", self.config.models["face_pack"])

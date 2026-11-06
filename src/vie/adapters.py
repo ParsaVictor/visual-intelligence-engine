@@ -53,7 +53,15 @@ def face_vectors(app: Any, image: Any, faces: Sequence[Any], flip: bool) -> list
     extra = np.asarray(recogniser.get_feat(mirrored), dtype=np.float32).reshape(len(faces), -1)
     out = []
     for face, other in zip(faces, extra, strict=True):
-        vector = np.asarray(face.embedding, dtype=np.float32).ravel() + other
+        seen = getattr(face, "embedding", None)
+        if seen is None:  # a FaceAnalysis built without its recognition module
+            seen = recogniser.get_feat(
+                [face_align.norm_crop(image, landmark=face.kps, image_size=size)]
+            )[0]
+        # Raw vectors are summed before normalising, as InsightFace's own flip test
+        # does: a raw norm tracks how much identity a view carries, so the clearer
+        # side of a turned face counts for more.
+        vector = np.asarray(seen, dtype=np.float32).ravel() + other
         out.append(vector / max(float(np.linalg.norm(vector)), 1e-12))
     return out
 

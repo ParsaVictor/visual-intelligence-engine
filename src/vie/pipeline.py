@@ -71,11 +71,14 @@ class IndexStats:
     skipped: int = 0
     pruned: int = 0
     failed: int = 0
+    #: Pruning was requested but refused, because too much of the index vanished.
+    prune_refused: bool = False
 
     def summary(self) -> str:
         return (
             f"scanned={self.scanned} indexed={self.indexed} skipped={self.skipped} "
             f"pruned={self.pruned} failed={self.failed}"
+            + (" prune=refused" if self.prune_refused else "")
         )
 
 
@@ -306,6 +309,7 @@ def build_index(
     batch_size: int | None = None,
     commit_every: int | None = None,
     prune: bool = True,
+    prune_guard: float = 0.5,
     rebuild: bool = False,
     rehash: bool = False,
     on_progress: Callable[[IndexStats], None] | None = None,
@@ -315,6 +319,9 @@ def build_index(
     All model access is injected, which keeps this function testable end to end
     without a GPU: the orchestration logic is what carries the risk here, not the
     model calls.
+
+    ``prune`` drops rows for files no longer on disk, unless fewer than
+    ``prune_guard`` of the indexed files are still there (``0`` disables the guard).
     """
     if embed_image is None and embed_batch is None:
         raise ValueError("build_index needs embed_batch or embed_image")
@@ -346,17 +353,31 @@ def build_index(
         index.bind_embedding_model(conn, config.models["vision_language"])
 
         if prune:
-            stats.pruned = index.prune_missing(conn, set(keys.values()))
-            if stats.pruned:
-                log.info("pruned %d rows for files no longer on disk", stats.pruned)
+            # An unmounted drive or a mistyped path looks exactly like "every photo
+            # was deleted". Rows cost minutes of GPU each to rebuild, so pruning most
+            # of the index at once is refused rather than trusted.
+            indexed = conn.execute("SELECT COUNT(*) FROM gallery_meta").fetchone()[0]
+            if indexed and len(keys) < indexed * prune_guard:
+                stats.prune_refused = True
+                log.warning(
+                    "only %d of %d indexed images are on disk; not pruning. Check the "
+                    "gallery path; to really drop them, run with --rebuild.",
+                    len(keys), indexed,
+                )
+            else:
+                stats.pruned = index.prune_missing(conn, set(keys.values()))
+                if stats.pruned:
+                    log.info("pruned %d rows for files no longer on disk", stats.pruned)
 
         known = index.known_files(conn)
+        stored_paths = dict(conn.execute("SELECT file_name, file_path FROM gallery_meta"))
         stale_faces = _stale_face_images(index, conn, config)
         if stale_faces:
             log.info("face recipe changed to %s: re-indexing the %d images with faces",
                      config.face.recipe, len(stale_faces))
         trust_mtime = settings.trust_mtime and not rehash
         pending: list[tuple[Path, str]] = []
+        refreshed: list[tuple[str, str, int, int]] = []
         for path in paths:
             key = keys[path]
             stat = path.stat()
@@ -369,12 +390,20 @@ def build_index(
                 and seen[1] == stat.st_size and seen[2] == stat.st_mtime_ns
             ):
                 stats.skipped += 1
+                if stored_paths.get(key) != str(path):
+                    refreshed.append((key, str(path), stat.st_size, stat.st_mtime_ns))
                 continue
             digest = content_hash(path)
             if seen is not None and seen[0] == digest:
+                # Same content under a new mtime or path: remember both, so the
+                # next run skips it from its stat alone instead of hashing again.
                 stats.skipped += 1
+                refreshed.append((key, str(path), stat.st_size, stat.st_mtime_ns))
                 continue
             pending.append((path, digest))
+        if refreshed:
+            index.refresh_files(conn, refreshed)
+            conn.commit()
 
         if not pending:
             index.set_meta(conn, "face_recipe", config.face.recipe)

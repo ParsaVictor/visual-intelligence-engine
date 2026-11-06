@@ -424,6 +424,22 @@ class Index:
             )
         }
 
+    def refresh_files(
+        self, conn: sqlite3.Connection, rows: list[tuple[str, str, int, int]]
+    ) -> None:
+        """Record where unchanged files now are, and their current size and mtime.
+
+        ``rows`` is ``(file_name, file_path, size, mtime_ns)`` for files whose content
+        hash matched. Without this, a file whose mtime moved (a copy, a sync, an
+        extracted archive) is re-hashed on every run, and a gallery that moved keeps
+        paths to where it used to be.
+        """
+        conn.executemany(
+            "UPDATE gallery_meta SET file_path = ?, file_size = ?, mtime_ns = ? "
+            "WHERE file_name = ?",
+            [(path, size, mtime, name) for name, path, size, mtime in rows],
+        )
+
     def candidates(self, conn: sqlite3.Connection, flag: str) -> list[GalleryRow]:
         if flag not in {"has_face", "has_animal", "has_food"}:
             raise ValueError(f"unknown flag {flag!r}")

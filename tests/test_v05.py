@@ -132,32 +132,56 @@ def test_load_config_merges_overrides_over_the_packaged_defaults(tmp_path) -> No
     assert config.face.match_threshold == 0.46  # untouched defaults survive
 
 
-def test_engine_refuses_to_prune_when_most_of_the_archive_vanished(cfg, monkeypatch) -> None:
+def test_pruning_most_of_the_index_at_once_is_refused(cfg) -> None:
+    """An unmounted drive looks like every photo was deleted; rows must survive it."""
+    stack = FakeStack(cfg)
+    stack.index()
+    for name in ("red.png", "blue.png"):
+        (cfg.gallery_path / name).unlink()
+    stats = stack.index()
+    assert stats.prune_refused and stats.pruned == 0
+    with Index(cfg.database_path).connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM gallery_meta").fetchone()[0] == 2
+    forced = stack.index(prune_guard=0.0)
+    assert forced.pruned == 2 and not forced.prune_refused
+
+
+def test_engine_reports_a_refused_prune(cfg, monkeypatch) -> None:
     import vie.adapters
     import vie.models
     import vie.pipeline
     from vie.api import Engine
 
-    FakeStack(cfg).index()
-    for name in ("red.png", "blue.png"):
-        (cfg.gallery_path / name).unlink()  # e.g. Drive not mounted yet
-
-    seen = {}
-
-    def fake_build_index(config, **kwargs):
-        seen["prune"] = kwargs["prune"]
-        return SimpleNamespace(scanned=1, indexed=1, skipped=0, pruned=0, failed=0)
-
-    monkeypatch.setattr(vie.pipeline, "build_index", fake_build_index)
+    monkeypatch.setattr(vie.pipeline, "build_index", lambda config, **kw: SimpleNamespace(
+        scanned=0, indexed=0, skipped=0, pruned=0, failed=0, prune_refused=True))
     monkeypatch.setattr(vie.adapters, "build_detectors", lambda b, c: SimpleNamespace(
         loader=None, size_of=None, face=None, animal=None, food=None, crop=None))
     monkeypatch.setattr(vie.models, "SpeciesClassifier", lambda b: SimpleNamespace(classify=None))
     engine = Engine(cfg)
     engine._bundle, engine._encoder = SimpleNamespace(), SimpleNamespace(
         embed_batch=None, food_gate_scores=None)
-    report = engine.index_images()
-    assert seen["prune"] is False and report.pruning is False
-    assert engine.counts()["images"] == 2
+    assert engine.index_images().pruning is False
+
+
+def test_auto_face_query_is_a_crop_of_the_chosen_face(cfg, tmp_path) -> None:
+    from PIL import Image
+
+    from vie.api import Engine
+
+    FakeStack(cfg).index()
+    engine = Engine(cfg)
+    assert engine.most_photographed_face() == cfg.gallery_path / "blue.png"
+    crop = engine.most_photographed_face(crop_to=tmp_path / "query.jpg")
+    with Image.open(crop) as image:
+        # The fake face is 50x60 inside a 120x90 photo; padded, then clipped to it.
+        assert image.size[0] <= 120 and image.size[1] <= 90 and image.size[0] > 50
+
+
+def test_video_search_needs_exactly_one_of_query_or_image(cfg) -> None:
+    from vie.api import Engine
+
+    with pytest.raises(ValueError, match="exactly one"):
+        Engine(cfg).search_videos()
 
 
 # ── presentation ──────────────────────────────────────────────────────
@@ -248,11 +272,62 @@ def test_shot_labeller_reads_labels_of_the_current_shot() -> None:
     from vie.api import shot_labeller
 
     analysis = SimpleNamespace(
-        shots=[SimpleNamespace(index=0, start=0.0, end=5.0),
-               SimpleNamespace(index=1, start=5.0, end=9.0)],
-        shot_labels=[SimpleNamespace(shot=0, labels={"topic": ("an interview", 0.8)}),
+        shots=[SimpleNamespace(index=1, start=5.0, end=9.0),
+               SimpleNamespace(index=0, start=0.0, end=5.0)],
+        shot_labels=[SimpleNamespace(shot=0, labels={"topic": ("an interview", 0.8),
+                                                     "setting": ("in a studio", 0.6)}),
                      SimpleNamespace(shot=1, labels={"topic": ("a lecture", 0.3)})],
     )
-    at = shot_labeller(analysis)
-    assert at(2.0) == ["an interview"]
-    assert at(6.0) == []  # below the presence threshold
+    at = shot_labeller(analysis, threshold=0.4)
+    assert at(2.0) == ["an interview", "in a studio"]
+    assert at(6.0) == []          # below the presence threshold
+    assert at(20.0) == []         # past the last shot
+    assert shot_labeller(analysis, threshold=0.2)(6.0) == ["a lecture"]
+
+
+def test_right_to_left_text_is_prepared_and_latin_is_untouched() -> None:
+    from vie.report.showcase import display_text, font
+
+    assert display_text("Person 1  93%") == "Person 1  93%"
+    assert isinstance(display_text("دانشجو ۱۰۴۲"), str)
+    assert font(20) is font(20)  # cached: looking up a face walks font folders
+
+
+# ── incremental runs stay incremental ─────────────────────────────────
+
+
+def test_a_touched_but_unchanged_file_is_hashed_once_then_never_again(cfg, monkeypatch) -> None:
+    """A sync or a copy moves the mtime. Hashing then must happen once, not forever."""
+    import os
+
+    import vie.pipeline as pipeline
+
+    stack = FakeStack(cfg)
+    stack.index()
+    target = cfg.gallery_path / "red.png"
+    os.utime(target, ns=(target.stat().st_atime_ns, target.stat().st_mtime_ns + 10**9))
+    hashed = []
+    real = pipeline.content_hash
+    monkeypatch.setattr(pipeline, "content_hash", lambda p: hashed.append(p) or real(p))
+    assert stack.index().indexed == 0
+    assert hashed == [target]
+    assert stack.index().indexed == 0
+    assert hashed == [target]  # the new mtime was remembered
+
+
+def test_a_moved_gallery_keeps_its_index_and_points_at_the_new_place(
+    cfg, raw_config, tmp_path
+) -> None:
+    import shutil
+
+    FakeStack(cfg).index()
+    moved = tmp_path / "moved"
+    shutil.copytree(cfg.gallery_path, moved)  # copytree keeps contents, not always mtimes
+    shutil.rmtree(cfg.gallery_path)
+    raw = copy.deepcopy(raw_config)
+    raw["paths"] = {"gallery": str(moved), "database": str(cfg.database_path)}
+    stats = FakeStack(Config.from_dict(raw)).index()
+    assert stats.indexed == 0 and stats.pruned == 0
+    with Index(cfg.database_path).connect() as conn:
+        paths = {Path(p).parent for (p,) in conn.execute("SELECT file_path FROM gallery_meta")}
+    assert paths == {moved}
