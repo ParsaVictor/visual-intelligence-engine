@@ -5,8 +5,14 @@ also lives in `src/vie/` on purpose: these are meant to be read top to bottom
 and run in Colab without installing the package, so each one carries its own
 config, model loading and helpers.
 
+**Start with `0_run_everything.ipynb`.** It installs the maintained package and runs the
+whole system on your Google Drive with one *Run all*: incremental indexing (only new files
+after the first run), all searches, video analysis, annotated output videos and
+presentation cards. The others below are standalone, read-top-to-bottom explanations.
+
 | Notebook | Covers |
 |:--|:--|
+| `0_run_everything.ipynb` | **The complete system in Colab**, on the current package |
 | `1_face_recognition.ipynb` | InsightFace `buffalo_l`, 512-d ArcFace, indexing and search |
 | `2_animal_recognition.ipynb` | MegaDetector + classifier + CLIP fallback, with a cell that **proves** the original species-mapping defect against the real ImageNet class list |
 | `3_food_recognition.ipynb` | RT-DETR-X + CLIP contrastive prompts |
