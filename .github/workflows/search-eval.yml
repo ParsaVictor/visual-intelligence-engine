@@ -17,7 +17,7 @@ jobs:
   eval:
     name: ${{ matrix.model }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -42,9 +42,10 @@ jobs:
           path: ~/.cache/huggingface
           key: hf-${{ matrix.model }}-v1
       - name: Fetch the labelled set
-        run: python scripts/fetch_calibration_data.py benchmarks/search-data --per-label 6
+        run: python scripts/fetch_calibration_data.py benchmarks/search-data --per-label 4
       - name: Evaluate
-        run: python scripts/eval_search.py benchmarks/search-data --model ${{ matrix.model }}
+        # Whole frame only: the multi-crop layout is 6x the crops, too slow for a CPU runner.
+        run: python scripts/eval_search.py benchmarks/search-data --model ${{ matrix.model }} --layout 1
       - uses: actions/upload-artifact@v4
         if: always()
         with:

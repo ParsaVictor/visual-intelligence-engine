@@ -125,6 +125,9 @@ def main() -> int:
     parser.add_argument("data", type=Path)
     parser.add_argument("--model", default="google/siglip-so400m-patch14-384")
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument("--layout", default=None,
+                        help="crop layout; default the config's. '1' (whole frame) is 6x "
+                             "faster, which a CPU runner needs for the 877M-parameter models")
     args = parser.parse_args()
 
     raw = copy.deepcopy(yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")))
@@ -134,18 +137,22 @@ def main() -> int:
     raw["indexing"]["batch_size"] = 6
     config = Config.from_dict(raw)
     encoder = VisionLanguageEncoder(load_all(config))
-    layout = config.crop_layout if config.multi_crop else "1"
+    layout = args.layout or (config.crop_layout if config.multi_crop else "1")
 
     paths = sorted(p for p in args.data.rglob("*.jpg") if p.is_file())
     labels = [p.relative_to(args.data).parts[1].replace("_", " ") for p in paths]
     kinds = [p.relative_to(args.data).parts[0] for p in paths]
     started = time.perf_counter()
     vectors: list[np.ndarray] = []
-    for path in paths:
-        image = np.asarray(Image.open(path).convert("RGB"))[:, :, ::-1].copy()  # BGR, as indexed
-        h, w = image.shape[:2]
-        regions = encoder.embed_batch([image], [crop_regions(w, h, layout)])[0]
-        vectors.append(np.vstack([v for _, v in regions]))
+    for start in range(0, len(paths), 4):
+        # BGR, as the index sees images.
+        images = [np.asarray(Image.open(p).convert("RGB"))[:, :, ::-1].copy()
+                  for p in paths[start:start + 4]]
+        regions = [crop_regions(im.shape[1], im.shape[0], layout) for im in images]
+        for found in encoder.embed_batch(images, regions):
+            vectors.append(np.vstack([v for _, v in found]))
+        print(f"  embedded {len(vectors)}/{len(paths)} in {time.perf_counter() - started:.0f} s",
+              flush=True)
     embed_s = time.perf_counter() - started
     whole = [v[:1] for v in vectors]  # region 0 is always the whole frame
     print(f"{args.model}: {len(paths)} images, {embed_s:.0f} s to embed", flush=True)
@@ -163,7 +170,8 @@ def main() -> int:
         variants["persian ensemble"] = {t: encoder.encode_query(PERSIAN[t], PERSIAN_TEMPLATES)
                                         for t in translated}
 
-    report: dict = {"model": args.model, "images": len(paths), "queries": len(targets),
+    report: dict = {"model": args.model, "layout": layout, "images": len(paths),
+                    "queries": len(targets),
                     "templates": templates, "seconds_to_embed": round(embed_s, 1),
                     "multi_crop": {}, "whole_frame_only": {}}
     for name, queries in variants.items():
