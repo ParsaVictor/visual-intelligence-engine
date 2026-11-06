@@ -1,0 +1,67 @@
+{
+  "source": "Search quality workflow, run 42239834130, scripts/eval_search.py --layout 1",
+  "set": "fetch_calibration_data.py --per-label 4: 12 Food-101 dishes, cats, dogs, mini-ImageNet artefacts as distractors",
+  "queries": 14,
+  "models": {
+    "google/siglip-so400m-patch14-384": {
+      "label alone": {
+        "mAP": 1.0,
+        "top1": 1.0,
+        "r_precision": 1.0
+      },
+      "ensemble": {
+        "mAP": 1.0,
+        "top1": 1.0,
+        "r_precision": 1.0
+      },
+      "persian alone": {
+        "mAP": 0.7384,
+        "top1": 0.7143,
+        "r_precision": 0.6786
+      },
+      "persian ensemble": {
+        "mAP": 0.422,
+        "top1": 0.4286,
+        "r_precision": 0.3464
+      },
+      "nothing_found": {
+        "present_min": 0.0229,
+        "present_median": 0.8633,
+        "absent_max": 0.3612,
+        "absent_median": 1.7e-05,
+        "a theatre stage with actors": 0.00084
+      },
+      "seconds_to_embed_cpu": 325.2
+    },
+    "google/siglip2-so400m-patch14-384": {
+      "label alone": {
+        "mAP": 1.0,
+        "top1": 1.0,
+        "r_precision": 1.0
+      },
+      "ensemble": {
+        "mAP": 1.0,
+        "top1": 1.0,
+        "r_precision": 1.0
+      },
+      "persian alone": {
+        "mAP": 0.9445,
+        "top1": 0.9286,
+        "r_precision": 0.9107
+      },
+      "persian ensemble": {
+        "mAP": 0.9373,
+        "top1": 1.0,
+        "r_precision": 0.875
+      },
+      "nothing_found": {
+        "present_min": 0.0092,
+        "present_median": 0.7466,
+        "absent_max": 0.0877,
+        "absent_median": 1.2e-05,
+        "a theatre stage with actors": 0.00072
+      },
+      "seconds_to_embed_cpu": 355.8
+    }
+  }
+}
