@@ -2,6 +2,32 @@
 
 Each version is a git tag. Check one out to get that state of the project.
 
+## v0.6.0: search the whole archive by what it shows
+
+**One concept search over photos and videos.** `Engine.search_everything("a theatre
+performance")` ranks photos and video moments together on SigLIP's calibrated
+probability that the description fits, keeps the strongest moments in view, and
+draws video tiles with their timestamp. The notebook has a section for it.
+
+**Food and unknown species no longer touch pixels at query time.** Each detected
+animal and dish is encoded at index time, padded exactly as search pads it, in the
+same batched pass as the scene regions (schema v4). A food query, or a species
+outside ImageNet, used to decode every candidate image and run the image tower on
+its crops, so it took minutes on thousands of photos; it is now a matrix product
+over stored vectors through the paths' own ranking rule. An older index is still
+served by cropping.
+
+**Persian queries and SigLIP 2.** `google/siglip2-so400m-patch14-384` is supported
+(its tokenizer declares no length, so the 64 tokens both models trained on are now
+explicit) and understands Persian. A query is averaged over several phrasings
+(`text.query_templates`). `scripts/eval_search.py` and the *Search quality* workflow
+measure both choices with the real weights.
+
+**Video faces at a fixed cost per person.** Each person keeps up to four exemplar
+views (the most typical, then the least alike) and their on-screen intervals,
+instead of a vector for every sighting; face search returns all of a person's
+intervals.
+
 ## v0.5.0: one engine, more accurate faces, output worth showing
 
 **Faces, measured against student-face-gate.** `scripts/face_benchmark.py` puts ArcFace

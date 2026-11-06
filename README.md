@@ -30,6 +30,7 @@ Faces, animals, food, plain-English descriptions, and moments inside a video, al
 | An animal | `vie search animal --query "red panda"` | Photos with the animal boxed |
 | A dish | `vie search food --query "ghormeh sabzi"` | Photos of it, even with no detector class for it |
 | A description | `vie search text --query "a man with a blue backpack"` | The closest matches |
+| A concept, everywhere | `Engine.search_everything("a theatre performance")` | Photos and video moments together, ranked on one scale |
 | A video | `vie video analyze clip.mp4 --html report.html` | Shots, topics, people, speech and a summary |
 | An annotated video | `Engine.render_video(...)` | An MP4 with every face tracked, named or grouped, on a timeline |
 | A moment | `vie video search --query "a goal being scored"` | Timestamps across all your videos |
@@ -74,7 +75,7 @@ Faces, animals, food, plain-English descriptions, and moments inside a video, al
 
 Three decisions carry most of the design:
 
-- **Index once, query cheaply.** A species the classifier knows is answered from stored predictions, with no model loaded at all.
+- **Index once, query cheaply.** A species the classifier knows is answered from stored predictions, with no model loaded at all. Every detected animal and dish also has its vector stored, so a food query or an unknown species is a matrix product, not a pass over the pixels.
 - **Ask against rivals.** Instead of thresholding a raw similarity, each query competes with prompts like "a different kind of animal", which gives the model a way to say no.
 - **Measure, then decide.** Thresholds and the search backend come from measurements on real data, including where they overturned the original assumptions.
 
@@ -93,6 +94,7 @@ More in [the architecture](docs/architecture.md), [the design decisions](docs/de
 | **Test with real weights** | End-to-end tests, plus a CI job running every real model |
 | **Understand video** | Shots, people, speech, timelines and search by moment |
 | **One engine** | Measured face upgrade, annotated output video, one-click Colab notebook |
+| **Search everything** | Concepts across photos and videos, Persian queries, food and species from stored vectors |
 
 Next up: on-screen text search, natural-language summaries and a REST API. See the [roadmap](ROADMAP.md) and [changelog](CHANGELOG.md).
 
