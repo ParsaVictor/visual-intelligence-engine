@@ -1,0 +1,163 @@
+{
+  "model": "google/siglip2-so400m-patch14-384",
+  "searches": [
+    {
+      "card": "01-food.jpg",
+      "kind": "food",
+      "query": "beef tartare",
+      "matches": 2,
+      "milliseconds": 1068.2,
+      "top": [
+        [
+          "food/beef_tartare_0.jpg",
+          0.9995
+        ],
+        [
+          "food/beef_tartare_1.jpg",
+          0.9987
+        ]
+      ]
+    },
+    {
+      "card": "02-food.jpg",
+      "kind": "food",
+      "query": "beignets",
+      "matches": 3,
+      "milliseconds": 434.3,
+      "top": [
+        [
+          "food/beignets_1.jpg",
+          0.9999
+        ],
+        [
+          "food/beignets_0.jpg",
+          0.9999
+        ],
+        [
+          "food/french_fries_0.jpg",
+          0.9776
+        ]
+      ]
+    },
+    {
+      "card": "03-animal.jpg",
+      "kind": "animal",
+      "query": "cat",
+      "matches": 1,
+      "milliseconds": 8.7,
+      "top": [
+        [
+          "animal/cat_2.jpg",
+          0.3769
+        ]
+      ]
+    },
+    {
+      "card": "04-animal.jpg",
+      "kind": "animal",
+      "query": "a puppy",
+      "matches": 2,
+      "milliseconds": 1061.5,
+      "top": [
+        [
+          "animal/dog_2.jpg",
+          0.9703
+        ],
+        [
+          "animal/dog_0.jpg",
+          0.9059
+        ]
+      ]
+    },
+    {
+      "card": "05-text.jpg",
+      "kind": "text",
+      "query": "a bowl of soup",
+      "matches": 0,
+      "milliseconds": 1363.4,
+      "top": []
+    },
+    {
+      "card": "06-concept.jpg",
+      "kind": "concept",
+      "query": "people sitting in a classroom",
+      "matches": 5,
+      "milliseconds": 2299.2,
+      "top": [
+        [
+          "classroom @ 0:10",
+          0.415
+        ],
+        [
+          "stills/classroom_004.0.jpg",
+          0.4105
+        ],
+        [
+          "classroom @ 0:28",
+          0.3236
+        ],
+        [
+          "stills/classroom_014.0.jpg",
+          0.2709
+        ],
+        [
+          "stills/classroom_024.0.jpg",
+          0.1761
+        ]
+      ]
+    },
+    {
+      "card": "07-concept.jpg",
+      "kind": "concept",
+      "query": "گربه",
+      "matches": 3,
+      "milliseconds": 432.9,
+      "top": [
+        [
+          "animal/cat_1.jpg",
+          0.014
+        ],
+        [
+          "animal/cat_0.jpg",
+          0.0036
+        ],
+        [
+          "animal/cat_2.jpg",
+          0.0026
+        ]
+      ]
+    },
+    {
+      "card": "08-concept.jpg",
+      "kind": "concept",
+      "query": "a theatre stage with actors",
+      "matches": 0,
+      "milliseconds": 1368.1,
+      "top": []
+    },
+    {
+      "card": "09-concept.jpg",
+      "kind": "concept",
+      "query": "تارتار گوشت",
+      "matches": 3,
+      "milliseconds": 433.6,
+      "top": [
+        [
+          "food/beef_tartare_1.jpg",
+          0.7074
+        ],
+        [
+          "food/beef_tartare_0.jpg",
+          0.4378
+        ],
+        [
+          "food/beignets_1.jpg",
+          0.0029
+        ]
+      ]
+    }
+  ],
+  "index": "27 found · 27 newly indexed · 0 unchanged (skipped) · 0 removed · 0 failed · 1544.8s",
+  "videos": "scanned=1 indexed=1 skipped=0 pruned=0 failed=0",
+  "index_seconds": 1586.8
+}
