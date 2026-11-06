@@ -110,7 +110,8 @@ def main() -> None:
     save_search_card(matches, args.out / "face-search.jpg", kind="face",
                      query="The same person, across cameras and poses",
                      query_images=queries,
-                     stats=CardStats(search_ms=elapsed, indexed_images=len(photos)))
+                     stats=CardStats(search_ms=elapsed, indexed_images=len(photos)),
+                     max_results=12)
 
     # ── videos ────────────────────────────────────────────────────────
     known = {}

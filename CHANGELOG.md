@@ -27,10 +27,28 @@ around the matched subject. `vie.video.render` writes an annotated MP4: tracked 
 names from reference photos (with a margin over the runner-up, as in the gate) or grouped
 people, shot labels and a presence timeline, plus a card of who appeared for how long.
 
+**Found in a strict review of the whole codebase, and fixed:**
+
+* **Face indexing was doing 2.2x the work it needed.** InsightFace runs every model in
+  its pack on every face by default, including two landmark models and age/gender that
+  nothing here reads. Loading only detection and recognition: 1144 -> 527 ms on a
+  four-face 1080p frame, with identical faces and vectors.
+* **Unchanged files could be re-hashed forever.** A file whose content matched but
+  whose mtime had moved (a copy, a Drive sync, an extracted zip) was skipped without the
+  new mtime being stored, so every later run read it in full again. A gallery that
+  moved kept pointing at its old paths. Both are now recorded on the first such run.
+* **Pruning is guarded in the pipeline,** so `vie index` is protected too, not only the
+  notebook: if fewer than half of the indexed files are on disk, nothing is deleted.
+* **The annotated video ignored rotation flags** (portrait phone videos came out
+  sideways) and gave up on a damaged file; it now uses the analysis decoder for both.
+* **Persian names and file names** are shaped right to left on cards and videos.
+* Comments that still described CLIP, MobileNetV3 and a 768-d space now describe what
+  runs: SigLIP so400m, ConvNeXt-Tiny and the margin rule.
+
 **`notebooks/0_run_everything.ipynb`.** The whole system with one *Run all* in Colab. The
 index lives on Google Drive, so the first run reads the whole dataset and later runs read
-only new or changed files: one photo added to 37 took 2.7 s instead of 49.7 s, unchanged
-videos 0.1 s instead of 216 s. Every stage reports its own failure and the rest carry on.
+only new or changed files: 37 photos took 18.4 s, and with one photo added the next run
+took 1.1 s; two videos took 67.8 s the first time and 0.0 s the next. Every stage reports its own failure and the rest carry on.
 
 ## v0.4.0: video understanding
 

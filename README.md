@@ -66,7 +66,7 @@ Faces, animals, food, plain-English descriptions, and moments inside a video, al
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ParsaVictor/visual-intelligence-engine/blob/main/notebooks/0_run_everything.ipynb)
 
-[`notebooks/0_run_everything.ipynb`](notebooks/0_run_everything.ipynb) runs the whole system with one *Run all*: index, all four searches, video analysis, annotated output videos and presentation cards. The index lives on Google Drive, so **the first run reads the whole dataset and every later run reads only new or changed files**. Measured in the notebook itself: one photo added to 37 took 2.7 s instead of 49.7 s, and unchanged videos took 0.1 s instead of 216 s.
+[`notebooks/0_run_everything.ipynb`](notebooks/0_run_everything.ipynb) runs the whole system with one *Run all*: index, all four searches, video analysis, annotated output videos and presentation cards. The index lives on Google Drive, so **the first run reads the whole dataset and every later run reads only new or changed files**. Measured in the notebook itself on a 4-core CPU: indexing 37 photos took 18.4 s, and after one more photo was added the next run took 1.1 s; two videos took 67.8 s to analyse the first time and 0.0 s the next.
 
 ## Architecture
 
