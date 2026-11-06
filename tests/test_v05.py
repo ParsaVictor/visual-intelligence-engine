@@ -416,3 +416,42 @@ def test_an_unknown_species_is_found_from_its_stored_vector(raw_config, tmp_path
     found = run_search(SimpleNamespace(kind="animal", query="red quokka", image=None,
                                        top_k=None), config, stack.load_runtime)
     assert [m.file_name for m in found] == ["red.png"] and found[0].box is not None
+
+
+# ── one description, photos and video moments together ────────────────
+
+
+def test_concept_search_returns_photos_and_video_moments(raw_config, tmp_path) -> None:
+    pytest.importorskip("av")
+    from test_video import write_video
+
+    from vie.api import Engine
+    from vie.report.showcase import save_search_card
+    from vie.video.engine import VideoEngine
+    from vie.video.library import index_videos
+
+    write_png(tmp_path / "gallery" / "red.png", (230, 20, 20))
+    write_png(tmp_path / "gallery" / "blue.png", (20, 20, 230))
+    write_video(tmp_path / "videos" / "clip.mp4", [((230, 20, 20), 4), ((20, 230, 20), 4)])
+    raw = copy.deepcopy(raw_config)
+    raw["paths"] = {"gallery": str(tmp_path / "gallery"), "videos": str(tmp_path / "videos"),
+                    "database": str(tmp_path / "index.db")}
+    raw["video"]["sample_seconds"] = 0.5
+    raw["video"]["keyframe_seconds"] = 2.0
+    config = Config.from_dict(raw)
+    stack = FakeStack(config)
+    stack.index()
+    index_videos(config, VideoEngine(config, stack.encoder, on_stage=lambda s: None))
+
+    engine = Engine(config)
+    engine._bundle, engine._encoder = stack.bundle, stack.encoder
+    result = engine.search_everything("something red", top_k=4, min_moments=1,
+                                      frames_dir=tmp_path / "frames")
+    names = [m.file_name for m in result.matches]
+    assert "red.png" in names
+    videos = [i for i, badge in enumerate(result.badges) if badge]
+    assert videos and names[videos[0]].startswith("clip @ 0:0")
+    assert Path(result.matches[videos[0]].file_path).is_file()  # the grabbed frame
+    card = save_search_card(result.matches, tmp_path / "card.png", kind="concept",
+                            query=result.query, badges=result.badges)
+    assert card.is_file()

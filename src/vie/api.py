@@ -86,6 +86,8 @@ class SearchResult:
     matches: list[Match]
     milliseconds: float
     query_images: list[Path] = field(default_factory=list)
+    #: Per result, a short tag drawn on its tile, such as "VIDEO 01:24"; same order.
+    badges: list[str | None] = field(default_factory=list)
 
 
 class Engine:
@@ -226,6 +228,76 @@ class Engine:
     def search_text(self, query: str, top_k: int | None = None) -> SearchResult:
         return self._search("text", query=query, top_k=top_k or self.config.top_k)
 
+    def search_everything(
+        self,
+        query: str,
+        *,
+        top_k: int = 12,
+        min_moments: int = 4,
+        frames_dir: str | Path | None = None,
+    ) -> SearchResult:
+        """One description, every photo and every video moment that shows it.
+
+        Photos are scored by their best region and video moments by their keyframes,
+        both through SigLIP's calibrated probability that the description fits, so
+        they rank on one scale. Video keyframes carry a whole-frame vector only, which
+        reads a little lower than a photo's best region, so the strongest
+        ``min_moments`` moments are kept even when photos outscore them.
+
+        Each moment becomes a result whose picture is the frame at its start, grabbed
+        from the video into ``frames_dir`` (a temporary folder by default).
+        """
+        import tempfile
+
+        from vie.query import query_vector
+
+        started = time.perf_counter()
+        photos = self.search_text(query, top_k=top_k).matches if self.counts()["images"] else []
+        moments: list[Any] = []
+        if self.counts()["videos"]:
+            from vie.video.store import VideoStore
+
+            store = VideoStore(self.config)
+            store.initialise()
+            with store.connect() as conn:
+                store.index.check_embedding_model(conn, self.config.models["vision_language"])
+                vector = query_vector(self.encoder, query, self.config)
+                moments = store.search_visual(conn, vector, top_k=top_k)
+        calibrate = getattr(self.encoder, "calibrated", None)
+
+        def probability(cosine: float) -> float:
+            value = calibrate(cosine) if calibrate is not None else None
+            return cosine if value is None else value
+
+        frames = Path(frames_dir or tempfile.mkdtemp(prefix="vie-frames-"))
+        clips: list[tuple[Match, str]] = []
+        for moment in moments:
+            picture = grab_frame(moment.file_path, moment.start, frames)
+            if picture is None:
+                continue
+            clock = f"{int(moment.start // 60)}:{int(moment.start % 60):02d}"
+            clips.append((Match(file_name=f"{Path(moment.video_key).stem} @ {clock}",
+                                file_path=str(picture), score=probability(moment.score)),
+                          f"VIDEO {clock}"))
+
+        ranked = [(m.display_score, m, None) for m in photos]
+        ranked += [(m.score, m, badge) for m, badge in clips]
+        ranked.sort(key=lambda item: -item[0])
+        chosen = ranked[:top_k]
+        missing = [item for item in ranked[top_k:] if item[2] is not None]
+        have = sum(1 for item in chosen if item[2] is not None)
+        for item in missing[: max(0, min_moments - have)]:
+            # Make room by dropping the weakest photo, keeping the order by score.
+            photo_positions = [i for i, entry in enumerate(chosen) if entry[2] is None]
+            if not photo_positions:
+                break
+            chosen.pop(photo_positions[-1])
+            chosen.append(item)
+        chosen.sort(key=lambda item: -item[0])
+        matches = [replace(m, confidence=score) for score, m, _ in chosen]
+        return SearchResult("concept", query, matches, (time.perf_counter() - started) * 1000,
+                            badges=[badge for _, _, badge in chosen])
+
     def most_photographed_face(self, crop_to: str | Path | None = None,
                                sample: int = 3000) -> Path | None:
         """A photo of whoever appears most often: a sensible demo query.
@@ -282,7 +354,7 @@ class Engine:
 
         return save_search_card(
             result.matches, path, kind=result.kind, query=result.query,
-            query_images=result.query_images,
+            query_images=result.query_images, badges=result.badges or None,
             stats=CardStats(search_ms=result.milliseconds,
                             indexed_images=self.counts()["images"]),
             **kwargs,
@@ -393,6 +465,30 @@ class Engine:
             seen = store.search_visual(conn, query_vector(self.encoder, query, self.config),
                                        top_k=top_k)
             return (spoken + seen)[:top_k]
+
+
+def grab_frame(video: str | Path, at: float, folder: Path, max_side: int = 1280) -> Path | None:
+    """Save the frame at ``at`` seconds as a JPEG in ``folder``; ``None`` if unreadable.
+
+    Through the analysis decoder, so a rotated phone video comes out upright.
+    """
+    from PIL import Image
+
+    from vie.video.decode import frames_at
+
+    target = folder / f"{Path(video).stem}-{at:08.2f}.jpg"
+    if target.exists():
+        return target
+    try:
+        frame = next(iter(frames_at(video, [at], max_side=max_side)), None)
+    except Exception:  # noqa: BLE001 - a missing or damaged video loses one tile, not the card
+        log.warning("could not read %s at %.1f s", video, at)
+        return None
+    if frame is None:
+        return None
+    folder.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(frame.image[:, :, ::-1]).save(target, quality=90)
+    return target
 
 
 def shot_labeller(analysis: Any, threshold: float = 0.4) -> Callable[[float], list[str]]:

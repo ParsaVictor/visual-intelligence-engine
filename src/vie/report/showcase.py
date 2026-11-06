@@ -43,6 +43,7 @@ KIND_TITLES = {
     "animal": "Species search",
     "food": "Dish search",
     "text": "Free-text search",
+    "concept": "Concept search · photos and videos",
     "video": "Video understanding",
 }
 
@@ -54,6 +55,8 @@ SCORE_NOTES = {
     "animal": ("confidence", "classifier probability, or SigLIP margin over rival prompts"),
     "food": ("confidence", "SigLIP margin over rival prompts"),
     "text": ("confidence", "SigLIP's calibrated probability that the description fits"),
+    "concept": ("confidence", "SigLIP's calibrated probability that the description fits · "
+                              "video tiles show the moment's first frame"),
 }
 
 
@@ -235,8 +238,12 @@ def render_search_card(
     columns: int = 4,
     max_results: int = 8,
     width: int = 1600,
+    badges: Sequence[str | None] | None = None,
 ) -> Any:
-    """Render a search as one image. Returns a Pillow image."""
+    """Render a search as one image. Returns a Pillow image.
+
+    ``badges`` tags results by position, e.g. ``"VIDEO 1:24"`` on a video moment.
+    """
     from PIL import Image, ImageDraw
 
     shown = list(matches[:max_results])
@@ -333,6 +340,11 @@ def render_search_card(
         draw.rounded_rectangle((x0, y0, x0 + tile_w, y0 + tile_h), radius=14, outline=HAIR, width=1)
         pill(draw, (x0 + 12, y0 + 12), f"{i + 1:02d}", f_small,
              SIGNAL if i == 0 else (0, 0, 0, 150), SIGNAL_INK if i == 0 else PAPER)
+        badge = badges[i] if badges is not None and i < len(badges) else None
+        if badge:
+            text = "▶ " + badge
+            bw = _text_width(draw, text, f_small) + 20
+            pill(draw, (x0 + tile_w - bw - 12, y0 + 12), text, f_small, LANES[1], SIGNAL_INK)
 
         cy = y0 + tile_h + 14
         value = max(0.0, min(1.0, match.display_score))
