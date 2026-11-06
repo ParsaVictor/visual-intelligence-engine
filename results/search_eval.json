@@ -1,0 +1,122 @@
+{
+  "source": "Search quality workflow, run 42239834130, scripts/eval_search.py --layout 1",
+  "set": "fetch_calibration_data.py --per-label 4: 12 Food-101 dishes, cats, dogs, mini-ImageNet artefacts as distractors",
+  "queries": 14,
+  "models": {
+    "google/siglip-so400m-patch14-384": {
+      "label alone": {
+        "mAP": 1.0,
+        "top1": 1.0,
+        "r_precision": 1.0
+      },
+      "ensemble": {
+        "mAP": 1.0,
+        "top1": 1.0,
+        "r_precision": 1.0
+      },
+      "persian alone": {
+        "mAP": 0.7384,
+        "top1": 0.7143,
+        "r_precision": 0.6786
+      },
+      "persian ensemble": {
+        "mAP": 0.422,
+        "top1": 0.4286,
+        "r_precision": 0.3464
+      },
+      "nothing_found": {
+        "present_min": 0.0229,
+        "present_median": 0.8633,
+        "absent_max": 0.3612,
+        "absent_median": 1.7e-05,
+        "a theatre stage with actors": 0.00084
+      },
+      "seconds_to_embed_cpu": 325.2,
+      "at_configured_thresholds": {
+        "food (0.98)": {
+          "precision": 0.8889,
+          "recall": 1.0
+        },
+        "animal (0.91)": {
+          "precision": 0.9524,
+          "recall": 1.0
+        },
+        "food gate (-1.0)": {
+          "precision": 1.0,
+          "recall": 1.0
+        }
+      }
+    },
+    "google/siglip2-so400m-patch14-384": {
+      "label alone": {
+        "mAP": 1.0,
+        "top1": 1.0,
+        "r_precision": 1.0
+      },
+      "ensemble": {
+        "mAP": 1.0,
+        "top1": 1.0,
+        "r_precision": 1.0
+      },
+      "persian alone": {
+        "mAP": 0.9445,
+        "top1": 0.9286,
+        "r_precision": 0.9107
+      },
+      "persian ensemble": {
+        "mAP": 0.9373,
+        "top1": 1.0,
+        "r_precision": 0.875
+      },
+      "nothing_found": {
+        "present_min": 0.0092,
+        "present_median": 0.7466,
+        "absent_max": 0.0877,
+        "absent_median": 1.2e-05,
+        "a theatre stage with actors": 0.00072
+      },
+      "seconds_to_embed_cpu": 355.8,
+      "at_configured_thresholds": {
+        "food (0.98, SigLIP's)": {
+          "precision": 0.9348,
+          "recall": 0.8958
+        },
+        "animal (0.91, SigLIP's)": {
+          "precision": 1.0,
+          "recall": 0.9
+        },
+        "food (0.92, best F1 margin 2.49)": {
+          "precision": 0.94,
+          "recall": 0.9792
+        },
+        "animal (0.84, best F1 margin 1.62)": {
+          "precision": 0.9524,
+          "recall": 1.0
+        },
+        "food gate (-1.0)": {
+          "precision": 0.96,
+          "recall": 1.0
+        }
+      }
+    }
+  },
+  "calibration_run": "Search quality workflow, run 42241763687, scripts/calibrate.py",
+  "confirmation_run": {
+    "run": 42245151851,
+    "note": "same thresholds, sample of 44 dish images instead of 48",
+    "google/siglip2-so400m-patch14-384": {
+      "food (0.92)": {
+        "precision": 0.898,
+        "recall": 1.0
+      },
+      "animal (0.84)": {
+        "precision": 0.95,
+        "recall": 0.95
+      },
+      "food gate (-1.0)": {
+        "precision": 0.9565,
+        "recall": 1.0
+      }
+    }
+  }
+}

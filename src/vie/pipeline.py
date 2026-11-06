@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Any
 
 from vie.config import Config
-from vie.database import Index, content_hash
-from vie.geometry import pad_box
+from vie.database import Index, content_hash, format_box
+from vie.geometry import Box, pad_box
 from vie.indexing import BoxDetector, FaceDetector, ImageAnalysis, analyse_batch
 from vie.logging_setup import get_logger
 from vie.quality import crop_regions
@@ -71,11 +71,14 @@ class IndexStats:
     skipped: int = 0
     pruned: int = 0
     failed: int = 0
+    #: Pruning was requested but refused, because too much of the index vanished.
+    prune_refused: bool = False
 
     def summary(self) -> str:
         return (
             f"scanned={self.scanned} indexed={self.indexed} skipped={self.skipped} "
             f"pruned={self.pruned} failed={self.failed}"
+            + (" prune=refused" if self.prune_refused else "")
         )
 
 
@@ -144,12 +147,58 @@ class _Components:
     crop: Callable[[Any, Any], Any] | None
 
 
-def _embed(items: list[_Item], config: Config, parts: _Components) -> list[list[tuple[str, Any]]]:
+#: Separates an object region's kind from its box in a region name: "food|10,20,90,80".
+OBJECT_SEP = "|"
+
+
+def object_regions(
+    size: tuple[int, int], analysis: ImageAnalysis, config: Config
+) -> list[tuple[str, Box, Box]]:
+    """``(name, detector box, padded crop)`` for every animal and dish to embed.
+
+    Padded exactly as :func:`vie.search.animal.select_crops` and
+    :func:`vie.search.food.select_crops` pad at query time, so a stored vector is the
+    vector those paths would have computed. Size floors were applied at detection;
+    the confidence floor is applied at query time, against the stored confidence.
+    Food boxes outside ``food.search_classes`` (a fork, a cup) are never searched,
+    so they are not embedded either.
+    """
+    width, height = size
+    out: list[tuple[str, Box, Box]] = []
+    for box, _ in analysis.animal_boxes:
+        crop = pad_box(box, width, height, ratio=config.animal.padding_ratio)
+        out.append((f"animal{OBJECT_SEP}{format_box(box)}", box, crop))
+    searchable = set(config.food.search_classes)
+    for box, _, class_id in analysis.food_detections:
+        if class_id is not None and class_id not in searchable:
+            continue
+        crop = pad_box(box, width, height, pixels=config.food.padding_px)
+        out.append((f"food{OBJECT_SEP}{format_box(box)}", box, crop))
+    return out
+
+
+def _embed(
+    items: list[_Item], analyses: list[ImageAnalysis], config: Config, parts: _Components
+) -> list[list[tuple[str, Any]]]:
+    """Every region vector of every image, objects included, in one batched pass."""
     if parts.embed_batch is not None:
         layout = config.crop_layout if config.multi_crop else "1"
-        regions = [crop_regions(*item.size, layout) for item in items]
+        regions = [
+            crop_regions(*item.size, layout)
+            + [(name, crop) for name, _, crop in object_regions(item.size, analysis, config)]
+            for item, analysis in zip(items, analyses, strict=True)
+        ]
         return parts.embed_batch([item.image for item in items], regions)
     return [[("whole", parts.embed_image(item.image))] for item in items]
+
+
+def _split_objects(
+    vectors: list[tuple[str, Any]],
+) -> tuple[list[tuple[str, Any]], dict[str, Any]]:
+    """Separate scene regions (text search) from object regions (food and animals)."""
+    scene = [(name, v) for name, v in vectors if OBJECT_SEP not in name]
+    objects = {name: v for name, v in vectors if OBJECT_SEP in name}
+    return scene, objects
 
 
 def _food_gate_scores(
@@ -201,6 +250,7 @@ def _write(
     predictions: list[tuple[Any, int, float]],
     config: Config,
     gate_enabled: bool,
+    objects: dict[str, Any] | None = None,
 ) -> None:
     food_by_vlm = gate_enabled and gate >= config.food.clip_gate_threshold
     stat = item.path.stat()
@@ -221,6 +271,7 @@ def _write(
             food_vlm_score=gate,
             index_scale=item.scale,
             mtime_ns=stat.st_mtime_ns,
+            objects_embedded=objects is not None,
         )
         for box, embedding in analysis.faces:
             index.add_face(conn, item.key, box, embedding)
@@ -232,6 +283,16 @@ def _write(
             index.add_food_box(conn, item.key, box, confidence, class_id)
         for name, vector in regions:
             index.add_clip(conn, item.key, vector, region=name)
+        if objects is not None:
+            confidence = {("animal", box): (c, None) for box, c in analysis.animal_boxes}
+            confidence.update({("food", box): (c, k) for box, c, k in analysis.food_detections})
+            for name, box, crop in object_regions(item.size, analysis, config):
+                vector = objects.get(name)
+                if vector is None:  # an empty crop the encoder skipped
+                    continue
+                kind = name.split(OBJECT_SEP, 1)[0]
+                score, class_id = confidence[(kind, box)]
+                index.add_object(conn, item.key, kind, box, crop, score, class_id, vector)
 
 
 def _index_batch(
@@ -245,7 +306,10 @@ def _index_batch(
             animal_detector=parts.animal_detector,
             food_detector=parts.food_detector,
         )
-        vectors = _embed(items, config, parts)
+        embedded = _embed(items, analyses, config, parts)
+        split = [_split_objects(regions) for regions in embedded]
+        vectors = [scene for scene, _ in split]
+        objects = [found if parts.embed_batch is not None else None for _, found in split]
         gates = _food_gate_scores(vectors, config, parts)
         predictions = _classify_animals(items, analyses, config, parts)
     except Exception:
@@ -261,17 +325,31 @@ def _index_batch(
         return
 
     gate_enabled = parts.food_gate is not None and config.food.clip_gate_enabled
-    for item, analysis, regions, gate, found in zip(
-        items, analyses, vectors, gates, predictions, strict=True
+    for item, analysis, regions, gate, found, stored in zip(
+        items, analyses, vectors, gates, predictions, objects, strict=True
     ):
         try:
-            _write(index, conn, item, analysis, regions, gate, found, config, gate_enabled)
+            _write(index, conn, item, analysis, regions, gate, found, config, gate_enabled,
+                   stored)
             stats.indexed += 1
         except Exception:
             log.exception("failed to store %s", item.key)
             stats.failed += 1
     if on_progress is not None:
         on_progress(stats)
+
+
+def _stale_face_images(index: Index, conn: Any, config: Config) -> set[str]:
+    """Images whose face vectors came from a different recipe than the config's.
+
+    Mixing recipes in one index would quietly shift every score, so those images
+    are re-indexed. Only images that have faces pay for it, not the whole archive.
+    An index written before the recipe was recorded used plain ArcFace.
+    """
+    found = index.get_meta(conn, "face_recipe") or "arcface"
+    if found == config.face.recipe:
+        return set()
+    return {row[0] for row in conn.execute("SELECT file_name FROM gallery_meta WHERE has_face = 1")}
 
 
 def build_index(
@@ -293,6 +371,7 @@ def build_index(
     batch_size: int | None = None,
     commit_every: int | None = None,
     prune: bool = True,
+    prune_guard: float = 0.5,
     rebuild: bool = False,
     rehash: bool = False,
     on_progress: Callable[[IndexStats], None] | None = None,
@@ -302,6 +381,9 @@ def build_index(
     All model access is injected, which keeps this function testable end to end
     without a GPU: the orchestration logic is what carries the risk here, not the
     model calls.
+
+    ``prune`` drops rows for files no longer on disk, unless fewer than
+    ``prune_guard`` of the indexed files are still there (``0`` disables the guard).
     """
     if embed_image is None and embed_batch is None:
         raise ValueError("build_index needs embed_batch or embed_image")
@@ -333,30 +415,60 @@ def build_index(
         index.bind_embedding_model(conn, config.models["vision_language"])
 
         if prune:
-            stats.pruned = index.prune_missing(conn, set(keys.values()))
-            if stats.pruned:
-                log.info("pruned %d rows for files no longer on disk", stats.pruned)
+            # An unmounted drive or a mistyped path looks exactly like "every photo
+            # was deleted". Rows cost minutes of GPU each to rebuild, so pruning most
+            # of the index at once is refused rather than trusted.
+            indexed = conn.execute("SELECT COUNT(*) FROM gallery_meta").fetchone()[0]
+            if indexed and len(keys) < indexed * prune_guard:
+                stats.prune_refused = True
+                log.warning(
+                    "only %d of %d indexed images are on disk; not pruning. Check the "
+                    "gallery path; to really drop them, run with --rebuild.",
+                    len(keys), indexed,
+                )
+            else:
+                stats.pruned = index.prune_missing(conn, set(keys.values()))
+                if stats.pruned:
+                    log.info("pruned %d rows for files no longer on disk", stats.pruned)
 
         known = index.known_files(conn)
+        stored_paths = dict(conn.execute("SELECT file_name, file_path FROM gallery_meta"))
+        stale_faces = _stale_face_images(index, conn, config)
+        if stale_faces:
+            log.info("face recipe changed to %s: re-indexing the %d images with faces",
+                     config.face.recipe, len(stale_faces))
         trust_mtime = settings.trust_mtime and not rehash
         pending: list[tuple[Path, str]] = []
+        refreshed: list[tuple[str, str, int, int]] = []
         for path in paths:
             key = keys[path]
             stat = path.stat()
             seen = known.get(key)
+            if key in stale_faces:
+                pending.append((path, content_hash(path)))
+                continue
             if (
                 trust_mtime and seen is not None
                 and seen[1] == stat.st_size and seen[2] == stat.st_mtime_ns
             ):
                 stats.skipped += 1
+                if stored_paths.get(key) != str(path):
+                    refreshed.append((key, str(path), stat.st_size, stat.st_mtime_ns))
                 continue
             digest = content_hash(path)
             if seen is not None and seen[0] == digest:
+                # Same content under a new mtime or path: remember both, so the
+                # next run skips it from its stat alone instead of hashing again.
                 stats.skipped += 1
+                refreshed.append((key, str(path), stat.st_size, stat.st_mtime_ns))
                 continue
             pending.append((path, digest))
+        if refreshed:
+            index.refresh_files(conn, refreshed)
+            conn.commit()
 
         if not pending:
+            index.set_meta(conn, "face_recipe", config.face.recipe)
             log.info("index is up to date (%s)", stats.summary())
             return stats
 
@@ -383,6 +495,9 @@ def build_index(
                 conn.commit()  # checkpoint: an interruption keeps this much
                 last_commit = stats.indexed
                 log.info("checkpoint at %d images", stats.indexed)
+        # Recorded only once every stale image was redone, so an interrupted run
+        # picks the rest up next time.
+        index.set_meta(conn, "face_recipe", config.face.recipe)
 
     log.info("indexing complete (%s)", stats.summary())
     return stats

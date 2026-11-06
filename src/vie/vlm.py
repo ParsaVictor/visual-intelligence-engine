@@ -48,6 +48,16 @@ def is_siglip(model_name: str) -> bool:
     return "siglip" in model_name.lower()
 
 
+def is_multilingual(model_name: str) -> bool:
+    """SigLIP 2 was trained on multilingual WebLI; SigLIP and CLIP on English."""
+    return "siglip2" in model_name.lower()
+
+
+def has_right_to_left(text: str) -> bool:
+    """Persian, Arabic or Hebrew script anywhere in ``text``."""
+    return any("\u0590" <= ch <= "\u08ff" or "\ufb1d" <= ch <= "\ufeff" for ch in text)
+
+
 def default_score_mode(model_name: str) -> str:
     return SIGMOID if is_siglip(model_name) else SOFTMAX
 

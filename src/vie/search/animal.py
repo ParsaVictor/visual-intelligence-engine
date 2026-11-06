@@ -1,28 +1,28 @@
-"""Animal search — a hybrid of a supervised classifier and CLIP.
+"""Animal search: a hybrid of a supervised classifier and a vision-language model.
 
 Why hybrid
 ----------
 Two models answer "which animal is this", and they are good at different things:
 
-===================  ==========  ===========  ==========  ==================
-model                params      GFLOPs/crop  ImageNet    vocabulary
-===================  ==========  ===========  ==========  ==================
-MobileNetV3-Large    5.5 M       0.217        74.0 %      398 animal classes
-CLIP ViT-L/14        428 M       ~81          ~75.5 %     open
-===================  ==========  ===========  ==========  ==================
+=====================  ========  ===========  ==================================
+model                  params    ImageNet     vocabulary
+=====================  ========  ===========  ==================================
+ConvNeXt-Tiny          28.6 M    82.5 % top-1 398 ImageNet animal classes
+SigLIP so400m          877 M     ~83 % 0-shot open: any name a person can type
+=====================  ========  ===========  ==================================
 
-CLIP costs roughly **373x the compute per crop** for about 1.5 points of
-top-1 — a bad trade when the species is one the classifier already knows.
-But it is the *only* option when it is not: ``quokka`` is not an ImageNet
-class, so no supervised ImageNet model can ever return it.
+Published figures, not measured here. The classifier is about as accurate on the
+species it knows and far cheaper, and it runs once per crop at index time. SigLIP
+is the *only* option for a species outside ImageNet: ``quokka`` is not a class, so
+no ImageNet classifier can ever return it.
 
-So the classifier is the primary path and CLIP is the fallback:
+So the classifier is the primary path and SigLIP is the fallback:
 
 .. code-block:: text
 
     query -> resolve against ImageNet vocabulary
-               in vocabulary  -> precomputed predictions   (pure SQL, no inference)
-               out of it      -> CLIP over candidate crops (expensive, rare)
+               in vocabulary  -> stored predictions          (pure SQL, no model)
+               out of it      -> SigLIP over candidate crops (rival prompts, rare)
 
 The classifier also moves to **index time**. Each animal crop is classified
 once when the image is ingested and its top-k predictions are stored, so an
@@ -56,14 +56,14 @@ from vie.vlm import hypothesis_score
 
 
 class CropScorer(Protocol):
-    """Scores image crops against text prompts (CLIP)."""
+    """Scores image crops against text prompts (the vision-language model)."""
 
     def score(self, crops: Sequence[object], prompts: Sequence[str]) -> list[list[float]]:
         ...
 
 
 class CropClassifier(Protocol):
-    """Classifies image crops into a fixed vocabulary (MobileNetV3)."""
+    """Classifies image crops into a fixed vocabulary (ImageNet-1k; ConvNeXt-Tiny by default)."""
 
     def classify(self, crops: Sequence[object], top_k: int) -> list[list[tuple[int, float]]]:
         """Return ``(class_id, probability)`` pairs per crop, best first."""

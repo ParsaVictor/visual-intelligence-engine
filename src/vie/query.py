@@ -90,35 +90,71 @@ def query_face_embedding(image_path: Any, config: Config, bundle: Any) -> Any:
     app = bundle.face_app
     ctx = 0 if bundle.runtime.is_cuda else -1
 
-    def detect() -> list[tuple[Any, Any]]:
-        return [(tuple(int(v) for v in f.bbox[:4]), f.normed_embedding) for f in app.get(image)]
+    from vie.adapters import face_vectors
 
-    app.prepare(ctx_id=ctx, det_size=face_search.detection_size(width, height, config))
-    faces = detect()
-    if not faces:
-        # Retry once at full detection size: small or tightly cropped portraits
-        # are the common failure and this recovers most of them.
-        app.prepare(ctx_id=ctx, det_size=(config.face.det_size_large, config.face.det_size_large))
+    def detect() -> list[tuple[Any, Any]]:
+        found = list(app.get(image))
+        if not found:
+            return []
+        # Only the subject needs the mirrored pass, not every bystander.
+        subject = max(found, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+        vector = face_vectors(app, image, [subject], config.face.flip_tta)[0]
+        return [(tuple(int(v) for v in subject.bbox[:4]), vector)]
+
+    try:
+        app.prepare(ctx_id=ctx, det_size=face_search.detection_size(width, height, config))
         faces = detect()
+        if not faces:
+            # Retry once at full detection size: small or tightly cropped portraits
+            # are the common failure and this recovers most of them.
+            size = config.face.det_size_large
+            app.prepare(ctx_id=ctx, det_size=(size, size))
+            faces = detect()
+    finally:
+        # The bundle is shared with indexing and video, which expect the large size.
+        size = config.face.det_size_large
+        app.prepare(ctx_id=ctx, det_size=(size, size))
     if not faces:
-        raise ValueError("no face detected in the query image")
+        raise ValueError(f"no face detected in the query image {Path(image_path).name}")
     return face_search.select_query_face(faces)[1]
 
 
+def query_images(value: Any) -> list[Path]:
+    """``--image`` may be given once or several times."""
+    if value is None:
+        return []
+    items = value if isinstance(value, list | tuple) else [value]
+    return [Path(item) for item in items]
+
+
 def _search_face(args, config: Config, index: Index, load_runtime) -> list[Match]:
-    if args.image is None:
+    images = query_images(args.image)
+    if not images:
         raise ValueError("a face search needs a query image")
-    if not Path(args.image).is_file():
-        raise FileNotFoundError(f"query image not found: {args.image}")
+    for image in images:
+        if not image.is_file():
+            raise FileNotFoundError(f"query image not found: {image}")
 
     bundle, _, _ = load_runtime(config)
-    embedding = query_face_embedding(args.image, config, bundle)
+    embeddings = [query_face_embedding(image, config, bundle) for image in images]
     with index.connect() as conn:
         catalog = VectorCatalog.open(conn, "face_embeddings", config.search, _ann_cache(config))
-        return face_search.rank_catalog(embedding, catalog, _file_paths(conn), config)
+        return face_search.rank_catalog_multi(embeddings, catalog, _file_paths(conn), config)
 
 
 # ── free text ──────────────────────────────────────────────────────────
+
+
+def query_vector(encoder: Any, text: str, config: Config) -> Any:
+    """The vector a typed query is searched with, by text and video search alike."""
+    from vie.vlm import has_right_to_left, is_multilingual
+
+    model = config.models["vision_language"]
+    if has_right_to_left(text) and not is_multilingual(model):
+        log.warning("%s understands English only, so this query will match poorly; "
+                    "google/siglip2-so400m-patch14-384 understands Persian", model)
+    encode = getattr(encoder, "encode_query", None)
+    return encode(text) if encode is not None else encoder.encode_text(text)
 
 
 def _search_text(args, config: Config, index: Index, load_runtime) -> list[Match]:
@@ -130,9 +166,16 @@ def _search_text(args, config: Config, index: Index, load_runtime) -> list[Match
         catalog = VectorCatalog.open(conn, "clip_embeddings", config.search, _ann_cache(config))
         paths = _file_paths(conn)
     _, _, encoder = load_runtime(config)
-    vector = encoder.encode_text(query)
+    vector = query_vector(encoder, query, config)
     matches = text_search.rank_catalog(vector, catalog, paths, config, args.top_k)
-    return text_search.with_confidence(matches, getattr(encoder, "calibrated", None))
+    calibrate = getattr(encoder, "calibrated", None)
+    matches = text_search.with_confidence(matches, calibrate)
+    if config.min_probability > 0 and calibrate is not None and calibrate(0.0) is not None:
+        found = len(matches)
+        matches = [m for m in matches if m.display_score >= config.min_probability]
+        if found and not matches:
+            log.info("nothing cleared text.min_probability=%s", config.min_probability)
+    return matches
 
 
 # ── species ────────────────────────────────────────────────────────────
@@ -164,11 +207,18 @@ def _search_animal(args, config: Config, index: Index, load_runtime) -> list[Mat
                 log.info("no stored prediction cleared the floor; trying the open vocabulary")
         rows = index.candidates(conn, "has_animal")
         stored = index.animal_boxes(conn)
+        embedded = index.embedded_images(conn)
+        vectors = index.object_vectors(conn, "animal")
 
     log.info("%d candidate images after the has_animal prefilter", len(rows))
-    return _score_crops(
-        query, rows, stored, animal_search.select_crops, animal_search.rank_with_clip,
-        animal_search.Candidate, config, load_runtime,
+    fresh = [row for row in rows if row.file_name in embedded]
+    older = [row for row in rows if row.file_name not in embedded]
+    return best_per_image(
+        _score_stored(query, fresh, vectors, {}, "animal", animal_search.rank_with_clip,
+                      animal_search.Candidate, config, load_runtime)
+        + _score_crops(query, older, stored, animal_search.select_crops,
+                       animal_search.rank_with_clip, animal_search.Candidate, config,
+                       load_runtime)
     )
 
 
@@ -182,12 +232,88 @@ def _search_food(args, config: Config, index: Index, load_runtime) -> list[Match
     with index.connect() as conn:
         rows = index.candidates(conn, "has_food")
         stored = index.food_boxes(conn, config.food.search_classes)
+        embedded = index.embedded_images(conn)
+        vectors = index.object_vectors(conn, "food")
+        # For a gate-admitted image with no dish box above the search floor, the
+        # whole frame is scored instead, as the crop path does.
+        wholes = index.whole_vectors(conn, {r.file_name for r in rows if r.file_name in embedded})
 
     log.info("%d candidate images after the has_food prefilter", len(rows))
-    return _score_crops(
-        query, rows, stored, food_search.select_crops, food_search.rank,
-        food_search.Candidate, config, load_runtime, whole_frame_fallback=True,
+    fresh = [row for row in rows if row.file_name in embedded]
+    older = [row for row in rows if row.file_name not in embedded]
+    return best_per_image(
+        _score_stored(query, fresh, vectors, wholes, "food", food_search.rank,
+                      food_search.Candidate, config, load_runtime)
+        + _score_crops(query, older, stored, food_search.select_crops, food_search.rank,
+                       food_search.Candidate, config, load_runtime, whole_frame_fallback=True)
     )
+
+
+class _StoredVectors:
+    """A ``CropScorer`` over vectors computed at index time instead of over pixels.
+
+    The search paths' ranking functions take crops and a scorer; handing them stored
+    vectors and this scorer reuses their exact decision rule, while the work per
+    candidate drops from decoding an image and running the image tower to one dot
+    product per prompt.
+    """
+
+    def __init__(self, encoder: Any) -> None:
+        self.encoder = encoder
+
+    def score(self, vectors: list[Any], prompts: list[str]) -> list[list[float]]:
+        import numpy as np
+
+        if not vectors:
+            return []
+        texts = self.encoder.encode_texts(prompts)
+        return self.encoder.logits_from_similarity(np.vstack(vectors) @ texts.T).tolist()
+
+
+def _score_stored(
+    query: str,
+    rows: list[Any],
+    objects: dict[str, list[tuple[Any, Any, float, int | None, Any]]],
+    wholes: dict[str, Any],
+    kind: str,
+    rank: Any,
+    candidate_type: Any,
+    config: Config,
+    load_runtime: Any,
+) -> list[Match]:
+    """Score images indexed with object vectors: no image is opened.
+
+    The floors :func:`_score_crops` applies through ``select_crops`` are applied
+    here to the stored boxes: confidence at the search threshold, and for food only
+    the searchable classes. Size floors and padding were applied at index time.
+    """
+    if not rows:
+        return []
+    section = config.animal if kind == "animal" else config.food
+    searchable = set(config.food.search_classes) if kind == "food" else None
+    candidates: list[Any] = []
+    vectors: list[Any] = []
+    whole_frame: set[str] = set()
+    for row in rows:
+        kept = 0
+        for _, crop, confidence, class_id, vector in objects.get(row.file_name, []):
+            if confidence < section.search_confidence:
+                continue
+            if searchable is not None and class_id is not None and class_id not in searchable:
+                continue
+            candidates.append(candidate_type(row.file_name, row.file_path, crop, confidence))
+            vectors.append(vector)
+            kept += 1
+        if not kept and row.file_name in wholes:
+            candidates.append(candidate_type(row.file_name, row.file_path, (0, 0, 0, 0), 1.0))
+            vectors.append(wholes[row.file_name])
+            whole_frame.add(row.file_name)
+    if not candidates:
+        return []
+    _, scorer, _ = load_runtime(config)
+    matches = rank(query, candidates, vectors, _StoredVectors(scorer), config)
+    # A whole-frame match has no box worth drawing.
+    return [replace(m, box=None) if m.file_name in whole_frame else m for m in matches]
 
 
 def _score_crops(
@@ -212,6 +338,7 @@ def _score_crops(
 
     if not rows:
         return []
+    log.info("%d images indexed before object vectors; cropping them at query time", len(rows))
     _, scorer, _ = load_runtime(config)
     step = max(1, config.search.crop_batch)
 

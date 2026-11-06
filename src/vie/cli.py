@@ -1,7 +1,7 @@
 """Command-line interface.
 
     vie index
-    vie search face   --image query.jpg
+    vie search face   --image query.jpg [--image another.jpg ...]
     vie search animal --query "red panda"
     vie search food   --query "French fries"
     vie search text   --query "a man with a blue backpack" --html results.html
@@ -71,7 +71,8 @@ def _build_parser() -> argparse.ArgumentParser:
     kinds = search.add_subparsers(dest="kind", required=True)
 
     face = kinds.add_parser("face", help="find a person by photo", parents=[common])
-    face.add_argument("--image", required=True, type=Path)
+    face.add_argument("--image", required=True, type=Path, action="append",
+                      help="a photo of the person; repeat with more photos for better recall")
     face.add_argument("--top-k", type=int, default=None)
     face.add_argument("--html", type=Path, default=None, help="write a visual report here")
 
@@ -213,7 +214,8 @@ def _run_search(args: argparse.Namespace, config: Config, as_json: bool) -> int:
     if args.html is not None:
         from vie.report import write_search_report
 
-        query = str(args.image) if args.kind == "face" else args.query
+        query = (" + ".join(Path(p).name for p in args.image) if args.kind == "face"
+                 else args.query)
         write_search_report(matches, args.html, kind=args.kind, query=query)
         log.info("report written to %s", args.html)
     _render(matches, as_json)
@@ -293,6 +295,7 @@ def _run_video(args: argparse.Namespace, config: Config, as_json: bool) -> int:
 def _run_video_search(args: argparse.Namespace, config: Config, as_json: bool) -> int:
     from dataclasses import asdict
 
+    from vie.query import query_vector
     from vie.video.store import VideoStore
     from vie.video.understand import format_clock
 
@@ -321,7 +324,7 @@ def _run_video_search(args: argparse.Namespace, config: Config, as_json: bool) -
         else:
             moments = store.search_speech(conn, args.query, args.top_k)
             moments += store.search_visual(
-                conn, encoder.encode_text(args.query), top_k=args.top_k
+                conn, query_vector(encoder, args.query, config), top_k=args.top_k
             )
 
     if as_json:

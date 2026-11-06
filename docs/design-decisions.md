@@ -187,3 +187,81 @@ A video can take minutes to analyse, so an optional stage that fails produces a 
 on the report rather than an exception that discards the result. This came from a real
 run, in which Whisper running out of memory threw away a finished analysis. The same idea
 is why indexing commits periodically and retries a failed batch image by image.
+
+## ArcFace over SFace, with two ideas taken from SFace's project
+
+[student-face-gate](https://github.com/ParsaVictor/student-face-gate) recognises faces with
+SFace (128-d, 39 MB, about 12 ms a face on a laptop CPU) because it must run on a gate PC
+with no GPU. This system uses ArcFace from InsightFace `buffalo_l` (512-d, about 6x the CPU
+cost). Accuracy decides here, so the two were measured head to head on identical aligned
+crops (`scripts/face_benchmark.py`):
+
+| | ArcFace | SFace |
+|:--|--:|--:|
+| Separation d′ between same and different people | **8.08** | 5.86 |
+| Hard head poses accepted at the shipped threshold | **96.9%** | 83.6% |
+| Equal error rate | **0.0%** | 0.2% |
+
+ArcFace stays. What the gate does better is not the model but how it uses it, and two of
+those habits carry over:
+
+* **Mirror averaging.** Embed the aligned face and its mirror image, sum, normalise. A
+  turned face then carries evidence from both sides. Measured here: hard poses 96.9% ->
+  97.6%, d′ 8.08 -> 8.43, for one extra 112x112 pass per face, which is small next to
+  detection. On by default as `face.flip_tta`.
+* **Several photos of the person.** The gate enrols three photos and keeps the best match;
+  with a fixed threshold that took accepted visits from 86.1% to 96.3% with no wrong person
+  admitted. Here the same rule applies at query time: `--image` may be repeated.
+
+The index records which recipe produced its face vectors. Changing it re-indexes only the
+images that contain faces, so the upgrade does not cost a full rebuild.
+
+The benchmark is a pose stress test on public CC BY 4.0 footage, not LFW. It has two
+labelled identities for genuine pairs and uses "two faces in one frame are two people" for
+impostors, so its absolute numbers are optimistic; the comparison between models is the point.
+
+## Object vectors at index time, not crops at query time
+
+Food search and the out-of-vocabulary species path used to work like this: take
+every candidate image from SQL, decode it, crop each stored box, and run the image
+tower of the vision-language model on every crop, for every query. That is correct,
+and its cost grows with the archive: on thousands of photos one query took minutes.
+
+Since v0.6 each detected animal and dish is encoded once, at index time, in the same
+batched forward pass as the multi-crop regions, and stored in `object_embeddings`
+with its box, padded crop, confidence and class. The padding is the same function the
+search paths apply (`vie.pipeline.object_regions`), so a stored vector is the vector
+the crop path would have computed; a test checks the two paths agree on scores.
+
+At query time the stored vectors are handed to the paths' own ranking functions
+through a scorer over vectors (`_StoredVectors` in `vie.query`), so the decision rule,
+its rival prompts and its thresholds are unchanged. Only the work moved. The price is
+one extra vector per detected object, about 4.6 KB with SigLIP so400m, and one extra
+crop per object in the indexing batch.
+
+Images indexed before carry `objects_embedded = 0` and are still served by cropping.
+
+## One concept search over photos and videos
+
+A person looking for "a theatre performance" does not care whether it is in a photo
+or a film. `Engine.search_everything` scores both with the same text vector and ranks
+them on SigLIP's calibrated probability that the description fits, which is on one
+scale for both. Photos are scored by their best region and keyframes by their whole
+frame only (multi-crop for every keyframe would multiply video storage by six), so
+keyframes read slightly lower; the strongest few moments are therefore always kept.
+
+## A query is several phrasings, averaged
+
+"theatre", "a photo of theatre" and "a scene with theatre" land in slightly different
+places in the embedding space. Averaging them (prompt ensembling, `text.query_templates`)
+describes the concept more steadily than any single wording. `scripts/eval_search.py`
+measures it against the single phrasing on labelled photos with the real weights, for
+SigLIP and SigLIP 2, in English and Persian.
+
+## Faces in video: exemplars, not every sighting
+
+Storing a vector per face per keyframe costs up to 240 vectors per person per video,
+and every face search loaded them all. A person is a cluster already, so it is kept as
+up to four exemplar views, the most typical first and then the least alike
+(farthest-point sampling), plus the intervals they are on screen. A face search
+matches a person on any exemplar and returns all of their intervals.

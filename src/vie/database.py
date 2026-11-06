@@ -34,7 +34,7 @@ import numpy as np
 
 from vie.embeddings import from_blob, to_blob
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class SchemaError(RuntimeError):
@@ -68,7 +68,9 @@ CREATE TABLE IF NOT EXISTS gallery_meta (
     -- Boxes are stored in the coordinates of the capped image the models saw.
     -- Dividing by this factor maps them back onto the original file.
     index_scale  REAL    NOT NULL DEFAULT 1.0,
-    mtime_ns     INTEGER NOT NULL DEFAULT 0
+    mtime_ns     INTEGER NOT NULL DEFAULT 0,
+    -- 1 once the image's object vectors are stored (see object_embeddings).
+    objects_embedded INTEGER NOT NULL DEFAULT 0
 );
 
 -- (file_name, bbox) is the natural key: one row per detected face. Without it
@@ -123,6 +125,22 @@ CREATE TABLE IF NOT EXISTS food_boxes (
     FOREIGN KEY (file_name) REFERENCES gallery_meta (file_name) ON DELETE CASCADE
 );
 
+-- A vision-language vector of each detected animal and dish, cropped and padded
+-- exactly as the search paths crop them. With these stored, a food query or an
+-- out-of-vocabulary species query is a matrix product: no image is decoded and no
+-- image model runs at query time.
+CREATE TABLE IF NOT EXISTS object_embeddings (
+    file_name  TEXT NOT NULL,
+    kind       TEXT NOT NULL,          -- 'animal' or 'food'
+    bbox       TEXT NOT NULL,          -- the detector's box
+    crop       TEXT NOT NULL,          -- the padded box that was encoded
+    confidence REAL NOT NULL,
+    class_id   INTEGER,
+    embedding  BLOB NOT NULL,
+    PRIMARY KEY (file_name, kind, bbox),
+    FOREIGN KEY (file_name) REFERENCES gallery_meta (file_name) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_meta_face   ON gallery_meta (has_face);
 CREATE INDEX IF NOT EXISTS idx_meta_animal ON gallery_meta (has_animal);
 CREATE INDEX IF NOT EXISTS idx_meta_food   ON gallery_meta (has_food);
@@ -132,6 +150,7 @@ CREATE INDEX IF NOT EXISTS idx_pred_class  ON animal_predictions (class_id);
 #: Every table derived from an image, and so cleared when that image changes.
 DERIVED_TABLES = (
     "face_embeddings", "clip_embeddings", "animal_boxes", "animal_predictions", "food_boxes",
+    "object_embeddings",
 )
 
 _ADDED_COLUMNS = {
@@ -140,6 +159,9 @@ _ADDED_COLUMNS = {
     "food_vlm_score": "REAL NOT NULL DEFAULT 0.0",
     "index_scale": "REAL NOT NULL DEFAULT 1.0",
     "mtime_ns": "INTEGER NOT NULL DEFAULT 0",
+    # 1 once an image's object vectors were written; 0 for images indexed before,
+    # which the search paths still serve by cropping at query time.
+    "objects_embedded": "INTEGER NOT NULL DEFAULT 0",
 }
 
 
@@ -327,12 +349,14 @@ class Index:
         food_vlm_score: float = 0.0,
         index_scale: float = 1.0,
         mtime_ns: int = 0,
+        objects_embedded: bool = False,
     ) -> None:
         conn.execute(
             """INSERT INTO gallery_meta
                  (file_name, file_path, content_hash, file_size, has_face, has_animal, has_food,
-                  food_by_detector, food_by_vlm, food_vlm_score, index_scale, mtime_ns)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  food_by_detector, food_by_vlm, food_vlm_score, index_scale, mtime_ns,
+                  objects_embedded)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT (file_name) DO UPDATE SET
                  file_path = excluded.file_path, content_hash = excluded.content_hash,
                  file_size = excluded.file_size, has_face = excluded.has_face,
@@ -340,10 +364,11 @@ class Index:
                  food_by_detector = excluded.food_by_detector,
                  food_by_vlm = excluded.food_by_vlm,
                  food_vlm_score = excluded.food_vlm_score,
-                 index_scale = excluded.index_scale, mtime_ns = excluded.mtime_ns""",
+                 index_scale = excluded.index_scale, mtime_ns = excluded.mtime_ns,
+                 objects_embedded = excluded.objects_embedded""",
             (file_name, file_path, hash_, size, int(has_face), int(has_animal), int(has_food),
              int(food_by_detector), int(food_by_vlm), float(food_vlm_score),
-             float(index_scale), int(mtime_ns)),
+             float(index_scale), int(mtime_ns), int(objects_embedded)),
         )
 
     def add_face(
@@ -423,6 +448,64 @@ class Index:
                 "SELECT file_name, content_hash, file_size, mtime_ns FROM gallery_meta"
             )
         }
+
+    def add_object(
+        self, conn: sqlite3.Connection, file_name: str, kind: str, box: tuple,
+        crop: tuple, confidence: float, class_id: int | None, embedding: np.ndarray,
+    ) -> None:
+        conn.execute(
+            "INSERT OR REPLACE INTO object_embeddings "
+            "(file_name, kind, bbox, crop, confidence, class_id, embedding) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (file_name, kind, format_box(box), format_box(crop), float(confidence),
+             class_id, to_blob(embedding)),
+        )
+
+    def object_vectors(
+        self, conn: sqlite3.Connection, kind: str
+    ) -> dict[str, list[tuple[tuple, tuple, float, int | None, np.ndarray]]]:
+        """``file_name -> [(box, crop, confidence, class_id, vector)]`` for one kind."""
+        found: dict[str, list[tuple[tuple, tuple, float, int | None, np.ndarray]]] = {}
+        for name, bbox, crop, confidence, class_id, blob in conn.execute(
+            "SELECT file_name, bbox, crop, confidence, class_id, embedding "
+            "FROM object_embeddings WHERE kind = ?", (kind,)
+        ):
+            found.setdefault(name, []).append(
+                (parse_box(bbox), parse_box(crop), confidence, class_id, from_blob(blob))
+            )
+        return found
+
+    def embedded_images(self, conn: sqlite3.Connection) -> set[str]:
+        """Images whose object vectors are stored, so search needs no pixels."""
+        return {r[0] for r in conn.execute(
+            "SELECT file_name FROM gallery_meta WHERE objects_embedded = 1")}
+
+    def whole_vectors(self, conn: sqlite3.Connection, names: set[str]) -> dict[str, np.ndarray]:
+        """The stored whole-frame vector of each named image."""
+        if not names:
+            return {}
+        return {
+            name: from_blob(blob)
+            for name, blob in conn.execute(
+                "SELECT file_name, embedding FROM clip_embeddings WHERE region = 'whole'")
+            if name in names
+        }
+
+    def refresh_files(
+        self, conn: sqlite3.Connection, rows: list[tuple[str, str, int, int]]
+    ) -> None:
+        """Record where unchanged files now are, and their current size and mtime.
+
+        ``rows`` is ``(file_name, file_path, size, mtime_ns)`` for files whose content
+        hash matched. Without this, a file whose mtime moved (a copy, a sync, an
+        extracted archive) is re-hashed on every run, and a gallery that moved keeps
+        paths to where it used to be.
+        """
+        conn.executemany(
+            "UPDATE gallery_meta SET file_path = ?, file_size = ?, mtime_ns = ? "
+            "WHERE file_name = ?",
+            [(path, size, mtime, name) for name, path, size, mtime in rows],
+        )
 
     def candidates(self, conn: sqlite3.Connection, flag: str) -> list[GalleryRow]:
         if flag not in {"has_face", "has_animal", "has_food"}:

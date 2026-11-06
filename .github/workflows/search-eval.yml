@@ -1,0 +1,62 @@
+name: Search quality
+
+# Typed search with the real vision-language weights: does a query find the photos
+# it should? Compares SigLIP with SigLIP 2, one phrasing with several, and English
+# with Persian queries, on public labelled images. See scripts/eval_search.py.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["claude/**", "release/**"]
+    paths:
+      - "scripts/eval_search.py"
+      - "scripts/calibrate.py"
+      - "src/vie/models.py"
+      - "src/vie/default.yaml"
+      - ".github/workflows/search-eval.yml"
+
+jobs:
+  eval:
+    name: ${{ matrix.model }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        model:
+          - google/siglip-so400m-patch14-384
+          - google/siglip2-so400m-patch14-384
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the CPU stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install "torch==2.5.1" "torchvision==0.20.1" \
+            --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[models,cpu]"
+          pip freeze | grep -iE "^(torch|transformers|tokenizers|sentencepiece)="
+      - name: Cache model weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ matrix.model }}-v1
+      - name: Fetch the labelled set
+        run: python scripts/fetch_calibration_data.py benchmarks/search-data --per-label 4
+      - name: Evaluate
+        # Whole frame only: the multi-crop layout is 6x the crops, too slow for a CPU runner.
+        run: python scripts/eval_search.py benchmarks/search-data --model ${{ matrix.model }} --layout 1
+      - name: Food and species thresholds on this model
+        # The food, species and food-gate thresholds were calibrated on SigLIP; this
+        # reports precision and recall at the configured values for each model.
+        run: |
+          python scripts/calibrate.py benchmarks/search-data --model ${{ matrix.model }} \
+            --out benchmarks/calibration-${{ strategy.job-index }}.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: search-eval-${{ strategy.job-index }}
+          path: |
+            benchmarks/search-eval-*.json
+            benchmarks/calibration-*.json

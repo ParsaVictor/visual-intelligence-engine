@@ -38,6 +38,32 @@ class ConfigError(ValueError):
     """Raised when a configuration is internally inconsistent."""
 
 
+def merge(base: dict, extra: dict) -> dict:
+    """Deep-merge ``extra`` over ``base`` without mutating either."""
+    import copy
+
+    out = copy.deepcopy(base)
+    for key, value in (extra or {}).items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = merge(out[key], value)
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
+
+
+def with_model_overrides(raw: dict[str, Any]) -> dict[str, Any]:
+    """Apply ``model_overrides[<selected model>]`` on top of the rest of the config.
+
+    Thresholds are on each model's own scale: SigLIP 2's logit margins run narrower
+    than SigLIP's, so the same number means a stricter cut. Each model's measured
+    thresholds live under its name and follow it automatically, so switching models
+    never silently keeps another model's thresholds.
+    """
+    model = (raw.get("models") or {}).get("vision_language", "")
+    override = (raw.get("model_overrides") or {}).get(model)
+    return merge(raw, override) if override else raw
+
+
 @dataclass(frozen=True)
 class FaceConfig:
     match_threshold: float
@@ -47,6 +73,14 @@ class FaceConfig:
     det_size_small: int
     small_image_px: int
     max_index_dimension: int
+    # Embed each face and its mirror image and average the two. Measured in
+    # scripts/face_benchmark.py; costs one extra recognition pass per face.
+    flip_tta: bool = True
+
+    @property
+    def recipe(self) -> str:
+        """What produced the stored face vectors, so a change can be noticed."""
+        return "arcface" + ("+flip" if self.flip_tta else "")
 
 
 @dataclass(frozen=True)
@@ -126,6 +160,7 @@ class VideoConfig:
     whisper_model: str = "small"
     whisper_device: str = "auto"
     face_cluster_threshold: float = 0.45
+    face_exemplars: int = 4
     min_face_sightings: int = 2
     presence_gap: float = 12.0
     label_threshold: float = 0.40
@@ -162,6 +197,10 @@ class Config:
     database_path: Path
     model_cache: str
     models: dict[str, str]
+    #: Phrasings a free-text query is averaged over; see ``encode_query``.
+    query_templates: tuple[str, ...] = ("{query}",)
+    #: Below this calibrated probability a free-text result is not shown at all.
+    min_probability: float = 0.0
 
     # ---- construction -------------------------------------------------
 
@@ -178,6 +217,7 @@ class Config:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Config:
+        raw = with_model_overrides(raw)
         return cls(
             raw=raw,
             face=FaceConfig(**raw["face"]),
@@ -199,6 +239,8 @@ class Config:
             database_path=Path(raw["paths"]["database"]),
             model_cache=str(raw["paths"].get("model_cache", "") or ""),
             models=dict(raw["models"]),
+            query_templates=tuple(raw["text"].get("query_templates") or ("{query}",)),
+            min_probability=float(raw["text"].get("min_probability", 0.0)),
         )
 
     # ---- validation ---------------------------------------------------
@@ -206,6 +248,8 @@ class Config:
     def validate(self) -> None:
         """Enforce the index/search invariants. Raises :class:`ConfigError`."""
         problems: list[str] = []
+        if not self.query_templates or any("{query}" not in t for t in self.query_templates):
+            problems.append("text.query_templates must each contain {query}")
 
         # A candidate the gate rejects is unreachable at search time, so the
         # gate must never be the stricter of the two.

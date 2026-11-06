@@ -51,8 +51,13 @@ models:
   #   openai/clip-vit-large-patch14      428M params  ~75.5%
   #   google/siglip-base-patch16-224     203M params  ~76.2%   (runs on a laptop CPU)
   #   google/siglip-so400m-patch14-384   877M params  ~83.2%   (wants a GPU)
+  #   google/siglip2-so400m-patch14-384  1.1B params            (wants a GPU; multilingual)
+  # Measured here (results/search_eval.json, Search quality workflow): SigLIP 2 ties
+  # SigLIP on English queries (mAP 1.0 both) and leads on Persian (0.945 vs 0.738);
+  # with its own thresholds below it is level on food and species (precision 0.90-0.94
+  # vs 0.89 over two runs, species 0.95 both), so Persian decides.
   # Changing this requires `vie index --rebuild`; the index refuses to mix models.
-  vision_language: google/siglip-so400m-patch14-384
+  vision_language: google/siglip2-so400m-patch14-384
   # "sigmoid" for SigLIP, "softmax" for CLIP -- they are trained with
   # different objectives and their logits are not interchangeable.
   score_mode: sigmoid
@@ -62,6 +67,9 @@ models:
 
 face:
   # ArcFace embeddings are L2-normalised, so a dot product is cosine similarity.
+  # Measured in scripts/face_benchmark.py: the strongest different-person pair
+  # scored 0.30, while 98.9% of same-person pairs (97.6% at hard head poses)
+  # scored at least 0.46. Lower it for recall, raise it to be stricter.
   match_threshold: 0.46
 
   # Quality gate at index time. Deliberately permissive: the goal is only to
@@ -75,6 +83,11 @@ face:
   small_image_px: 400
   # Image cap, in pixels, applied to the longest side before any model runs.
   max_index_dimension: 1600
+  # Embed every face twice, as seen and mirrored, and average. Borrowed from
+  # student-face-gate, where it was measured on LFW; re-measured here for ArcFace
+  # in scripts/face_benchmark.py. Costs one extra 112x112 recognition pass per
+  # face, which is small next to detection. Changing it: `vie index --rebuild`.
+  flip_tta: true
 
 animal:
   # MegaDetector v5a raw YOLOv5 head: 0=animal, 1=person, 2=vehicle.
@@ -153,6 +166,22 @@ food:
 text:
   top_k: 5
 
+  # A free-text query is encoded in each of these phrasings and the vectors are
+  # averaged (prompt ensembling), which describes a concept more steadily than one
+  # wording. Measured in scripts/eval_search.py; ["{query}"] turns it off.
+  query_templates:
+    - "{query}"
+    - "a photo of {query}"
+    - "a picture showing {query}"
+    - "a scene with {query}"
+
+  # "Nothing found" instead of the least-bad few. SigLIP's calibrated probability
+  # that the description fits, measured in scripts/eval_search.py on both SigLIP and
+  # SigLIP 2: the right image of a present concept scored at least 0.009, while the
+  # best image for 7 of 8 absent concepts scored under 0.001 (median 0.00001).
+  # 0 shows everything. Applies to SigLIP models only, which calibrate.
+  min_probability: 0.001
+
   # Multi-crop embeddings. One vector for the whole frame plus a 2x2 grid and
   # a centre crop; a query scores against the best-matching region.
   #
@@ -196,6 +225,10 @@ video:
   whisper_device: auto     # auto | cpu | cuda
 
   face_cluster_threshold: 0.45  # the same ArcFace scale as face.match_threshold
+  # Face vectors kept per person per video, chosen to differ (frontal, turned, lit
+  # differently). Searching for someone compares against these; when they appear is
+  # stored as plain intervals. 4 keeps 1000 videos of ten people each under 100 MB.
+  face_exemplars: 4
   min_face_sightings: 2         # one glimpse is more likely a false detection
   presence_gap: 12.0            # seconds apart that still count as continuous
 
@@ -252,3 +285,15 @@ video:
       - someone driving
       - animals moving
       - text and graphics on screen
+
+# Thresholds on each model's own scale, applied when that model is selected above.
+# SigLIP 2's logit margins run narrower than SigLIP's (median food margin 6.3 vs 8.5),
+# so SigLIP's 0.98 / 0.91 kept its precision but lost a tenth of the right answers.
+# Calibrated with scripts/calibrate.py on the labelled set, in the Search quality
+# workflow; the sections above hold SigLIP so400m's values.
+model_overrides:
+  google/siglip2-so400m-patch14-384:
+    food:
+      match_threshold: 0.92    # precision 0.90-0.94, recall 0.98-1.00 (0.98: 0.935 / 0.896)
+    animal:
+      match_threshold: 0.84    # precision 0.95, recall 0.95-1.00 (0.91: 1.000 / 0.900)

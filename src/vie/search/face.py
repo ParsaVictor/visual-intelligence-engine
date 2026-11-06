@@ -83,6 +83,40 @@ def rank_catalog(
     return best_per_image(matches)
 
 
+def rank_catalog_multi(
+    query_embeddings: list[np.ndarray],
+    catalog: VectorCatalog,
+    file_paths: dict[str, str],
+    config: Config,
+) -> list[Match]:
+    """Search with several photos of the same person; each face keeps its best score.
+
+    One photo is one pose under one light. student-face-gate measured what a second
+    and third photo buy at a fixed threshold, with no wrong person admitted:
+    86.1% -> 92.8% -> 96.3% of genuine visits accepted. Taking the maximum over
+    the query photos is the same rule its matcher applies to enrolled templates.
+    """
+    if not query_embeddings:
+        raise ValueError("no query embedding")
+    if len(query_embeddings) == 1:
+        return rank_catalog(query_embeddings[0], catalog, file_paths, config)
+    exact = catalog.backend.name == "exact"
+    k = len(catalog) if exact else config.search.ann_candidates
+    best: dict[tuple[str, str], float] = {}
+    for embedding in query_embeddings:
+        for name, bbox, score in catalog.search(embedding, k):
+            key = (name, bbox)
+            if score > best.get(key, -1.0):
+                best[key] = score
+    matches = [
+        Match(file_name=name, file_path=file_paths.get(name, name), score=score,
+              box=parse_box(bbox))
+        for (name, bbox), score in best.items()
+        if score >= config.face.match_threshold
+    ]
+    return best_per_image(matches)
+
+
 def select_query_face(faces: list[tuple[Box, np.ndarray]]) -> tuple[Box, np.ndarray] | None:
     """Pick the subject of a query photo: the largest detected face.
 

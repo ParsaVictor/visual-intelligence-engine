@@ -1,17 +1,17 @@
-"""Open-vocabulary text search over CLIP image embeddings.
+"""Open-vocabulary text search over vision-language image embeddings.
 
-Both sides of the comparison are unit-length CLIP vectors in the same 768-d
-projected space, so the dot product is cosine similarity.
+Both sides are unit-length vectors from the configured model (SigLIP so400m by
+default, 1152-d; CLIP also works), so the dot product is cosine similarity.
 
-The change from the original is presentational but not cosmetic. It displayed
-raw cosine as a percentage, so its best result read ``23.30%`` — a perfectly
-healthy CLIP score that looks like failure to anyone reading it. CLIP cosines
-occupy a narrow band (roughly 0.15-0.35 for genuine matches) because the
-contrastive objective never required them to span [0, 1].
+Ranking uses the raw cosine. Display does not: the original showed the cosine as a
+percentage, so its best hit read ``23.30%``, a healthy score that looks like
+failure, because these models' cosines live in a narrow band well below 1.
+:func:`with_confidence` attaches what a reader should see instead: SigLIP's own
+calibrated probability when the model has a learned bias, and a relative
+confidence across the results otherwise.
 
-:func:`rank` therefore returns the raw similarity *and* a relative confidence
-computed across the candidate set, so the UI can show something interpretable
-without pretending the cosine itself is a probability.
+Each image is stored as several region vectors (multi-crop) and scores as its
+best region, so a small subject is not averaged away by the rest of the frame.
 """
 
 from __future__ import annotations

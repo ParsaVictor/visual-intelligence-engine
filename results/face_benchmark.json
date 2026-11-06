@@ -1,0 +1,60 @@
+{
+  "faces": 776,
+  "genuine_pairs": 17956,
+  "hard_pairs": 3716,
+  "impostor_pairs": 18472,
+  "models": {
+    "ArcFace buffalo_l (this repo)": {
+      "eer": 0.0,
+      "separation_d_prime": 8.08,
+      "genuine_mean": 0.777,
+      "impostor_max": 0.308,
+      "tar_at_far0": 1.0,
+      "hard_tar_at_far0": 1.0,
+      "threshold": 0.46,
+      "tar_at_threshold": 0.9856,
+      "hard_tar_at_threshold": 0.9691,
+      "far_at_threshold": 0.0,
+      "ms_per_face_cpu": 77.5
+    },
+    "ArcFace buffalo_l + mirror": {
+      "eer": 0.0,
+      "separation_d_prime": 8.43,
+      "genuine_mean": 0.787,
+      "impostor_max": 0.301,
+      "tar_at_far0": 1.0,
+      "hard_tar_at_far0": 1.0,
+      "threshold": 0.46,
+      "tar_at_threshold": 0.9888,
+      "hard_tar_at_threshold": 0.9755,
+      "far_at_threshold": 0.0,
+      "ms_per_face_cpu": 217.0
+    },
+    "SFace (student-face-gate)": {
+      "eer": 0.002,
+      "separation_d_prime": 5.86,
+      "genuine_mean": 0.776,
+      "impostor_max": 0.397,
+      "tar_at_far0": 0.9775,
+      "hard_tar_at_far0": 0.9779,
+      "threshold": 0.55,
+      "tar_at_threshold": 0.8975,
+      "hard_tar_at_threshold": 0.8361,
+      "far_at_threshold": 0.0,
+      "ms_per_face_cpu": 12.0
+    },
+    "SFace + mirror (student-face-gate)": {
+      "eer": 0.0021,
+      "separation_d_prime": 6.07,
+      "genuine_mean": 0.787,
+      "impostor_max": 0.402,
+      "tar_at_far0": 0.9816,
+      "hard_tar_at_far0": 0.9812,
+      "threshold": 0.55,
+      "tar_at_threshold": 0.9115,
+      "hard_tar_at_threshold": 0.8687,
+      "far_at_threshold": 0.0,
+      "ms_per_face_cpu": 13.3
+    }
+  }
+}

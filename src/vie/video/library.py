@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -67,11 +68,19 @@ class VideoIndexStats:
         )
 
 
-def index_videos(config: Config, engine: VideoEngine, *, prune: bool = True) -> VideoIndexStats:
+def index_videos(
+    config: Config,
+    engine: VideoEngine,
+    *,
+    prune: bool = True,
+    on_analysed: Callable[[str, Path, Any], None] | None = None,
+) -> VideoIndexStats:
     """Analyse every new or changed video, committing after each one.
 
     A video can take minutes, so losing one to an interruption is the most this
     can cost. A file that fails is counted and logged, and the run carries on.
+    ``on_analysed(key, path, analysis)`` runs after each video is stored, so a
+    caller can write its report while the analysis is still in memory.
     """
     store = VideoStore(config)
     store.initialise()
@@ -99,10 +108,18 @@ def index_videos(config: Config, engine: VideoEngine, *, prune: bool = True) -> 
                 stats.skipped += 1
                 continue
             try:
-                store.save(conn, key, path, digest, engine.analyse(path))
+                analysis = engine.analyse(path)
+                store.save(conn, key, path, digest, analysis)
                 conn.commit()
                 stats.indexed += 1
             except Exception:
                 log.exception("failed to analyse %s", key)
                 stats.failed += 1
+                continue
+            if on_analysed is not None:
+                try:
+                    on_analysed(key, path, analysis)
+                except Exception:
+                    # The analysis is stored; a failed report must not undo that.
+                    log.exception("post-processing failed for %s", key)
     return stats

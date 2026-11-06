@@ -60,13 +60,15 @@ def harvest(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("out", type=Path)
+    parser.add_argument("--per-label", type=int, default=3,
+                        help="images per dish; animals get this times 8/3 (search eval: 6)")
     args = parser.parse_args()
 
     # Food-101 is ordered by class, 250 validation images each.
     harvest(args.out, "food", "ethz/food101", "default", "validation", "label",
-            [i * 250 for i in range(0, 101, 9)], 100, 3)
+            [i * 250 for i in range(0, 101, 9)], 100, args.per_label)
     harvest(args.out, "animal", "microsoft/cats_vs_dogs", "default", "train", "labels",
-            [0, 12000], 100, 8)
+            [0, 12000], 100, max(8, args.per_label * 8 // 3))
     # WordNet ids: n03 and n04 are artefacts, n01 and n02 mostly animals.
     harvest(args.out, "other", "timm/mini-imagenet", "default", "validation", "label",
             list(range(0, 11000, 500)), 20, 2, lambda label: label.startswith(("n03", "n04")))
