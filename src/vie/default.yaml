@@ -161,6 +161,15 @@ food:
 text:
   top_k: 5
 
+  # A free-text query is encoded in each of these phrasings and the vectors are
+  # averaged (prompt ensembling), which describes a concept more steadily than one
+  # wording. Measured in scripts/eval_search.py; ["{query}"] turns it off.
+  query_templates:
+    - "{query}"
+    - "a photo of {query}"
+    - "a picture showing {query}"
+    - "a scene with {query}"
+
   # Multi-crop embeddings. One vector for the whole frame plus a 2x2 grid and
   # a centre crop; a query scores against the best-matching region.
   #

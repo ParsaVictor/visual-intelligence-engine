@@ -145,6 +145,18 @@ def _search_face(args, config: Config, index: Index, load_runtime) -> list[Match
 # ── free text ──────────────────────────────────────────────────────────
 
 
+def query_vector(encoder: Any, text: str, config: Config) -> Any:
+    """The vector a typed query is searched with, by text and video search alike."""
+    from vie.vlm import has_right_to_left, is_multilingual
+
+    model = config.models["vision_language"]
+    if has_right_to_left(text) and not is_multilingual(model):
+        log.warning("%s understands English only, so this query will match poorly; "
+                    "google/siglip2-so400m-patch14-384 understands Persian", model)
+    encode = getattr(encoder, "encode_query", None)
+    return encode(text) if encode is not None else encoder.encode_text(text)
+
+
 def _search_text(args, config: Config, index: Index, load_runtime) -> list[Match]:
     query = args.query.strip()
     if not query:
@@ -154,7 +166,7 @@ def _search_text(args, config: Config, index: Index, load_runtime) -> list[Match
         catalog = VectorCatalog.open(conn, "clip_embeddings", config.search, _ann_cache(config))
         paths = _file_paths(conn)
     _, _, encoder = load_runtime(config)
-    vector = encoder.encode_text(query)
+    vector = query_vector(encoder, query, config)
     matches = text_search.rank_catalog(vector, catalog, paths, config, args.top_k)
     return text_search.with_confidence(matches, getattr(encoder, "calibrated", None))
 

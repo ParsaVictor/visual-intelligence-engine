@@ -377,7 +377,7 @@ class Engine:
         first, as in ``vie video search``: a spoken word is an exact match, while a
         visual score is a cosine on another scale, so the two are not merged by score.
         """
-        from vie.query import query_face_embedding
+        from vie.query import query_face_embedding, query_vector
         from vie.video.store import VideoStore
 
         if (query is None) == (image is None):
@@ -390,7 +390,8 @@ class Engine:
                 vector = query_face_embedding(image, self.config, self.bundle)
                 return store.search_face(conn, vector, top_k)
             spoken = store.search_speech(conn, query, top_k)
-            seen = store.search_visual(conn, self.encoder.encode_text(query), top_k=top_k)
+            seen = store.search_visual(conn, query_vector(self.encoder, query, self.config),
+                                       top_k=top_k)
             return (spoken + seen)[:top_k]
 
 

@@ -170,6 +170,8 @@ class Config:
     database_path: Path
     model_cache: str
     models: dict[str, str]
+    #: Phrasings a free-text query is averaged over; see ``encode_query``.
+    query_templates: tuple[str, ...] = ("{query}",)
 
     # ---- construction -------------------------------------------------
 
@@ -207,6 +209,7 @@ class Config:
             database_path=Path(raw["paths"]["database"]),
             model_cache=str(raw["paths"].get("model_cache", "") or ""),
             models=dict(raw["models"]),
+            query_templates=tuple(raw["text"].get("query_templates") or ("{query}",)),
         )
 
     # ---- validation ---------------------------------------------------
@@ -214,6 +217,8 @@ class Config:
     def validate(self) -> None:
         """Enforce the index/search invariants. Raises :class:`ConfigError`."""
         problems: list[str] = []
+        if not self.query_templates or any("{query}" not in t for t in self.query_templates):
+            problems.append("text.query_templates must each contain {query}")
 
         # A candidate the gate rejects is unreachable at search time, so the
         # gate must never be the stricter of the two.

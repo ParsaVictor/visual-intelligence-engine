@@ -36,6 +36,9 @@ from vie.vlm import is_siglip, similarity_to_probability
 
 log = get_logger("models")
 
+#: SigLIP and SigLIP 2 both trained their text tower on exactly 64 tokens.
+SIGLIP_TEXT_TOKENS = 64
+
 #: Pinned so a change to yolov5 master cannot alter detection behaviour.
 YOLOV5_PIN = "v7.0"
 
@@ -348,10 +351,16 @@ class VisionLanguageEncoder:
     def _tokenize(self, texts: Sequence[str]) -> Any:
         # SigLIP was trained on text padded to its full 64 tokens, and its text
         # tower has no attention mask. padding=True produces a different, wrong
-        # embedding with no error at all.
-        padding = "max_length" if self.is_siglip else True
+        # embedding with no error at all. The length is given explicitly because
+        # SigLIP 2's Gemma tokenizer declares no maximum of its own, so
+        # "max_length" alone would pad to an effectively unbounded length.
+        if self.is_siglip:
+            return self.bundle.clip_processor(
+                text=list(texts), return_tensors="pt", padding="max_length",
+                max_length=SIGLIP_TEXT_TOKENS, truncation=True,
+            )
         return self.bundle.clip_processor(
-            text=list(texts), return_tensors="pt", padding=padding, truncation=True
+            text=list(texts), return_tensors="pt", padding=True, truncation=True
         )
 
     def encode_images(self, images: Sequence[Any], batch_size: int | None = None):
@@ -392,6 +401,22 @@ class VisionLanguageEncoder:
 
     def encode_text(self, text: str):
         return self.encode_texts([text])[0]
+
+    def encode_query(self, text: str, templates: Sequence[str] | None = None):
+        """One vector for a search query, averaged over several phrasings of it.
+
+        "theatre" alone, "a photo of theatre" and "a scene showing theatre" land in
+        slightly different places; their mean is a steadier description of the
+        concept than any one of them (prompt ensembling). The templates come from
+        ``text.query_templates``; with the single template ``{query}`` this is
+        exactly :meth:`encode_text`.
+        """
+        import numpy as np
+
+        templates = list(templates or self.bundle.config.query_templates or ["{query}"])
+        prompts = [t.format(query=text) for t in templates]
+        mean = self.encode_texts(prompts).mean(axis=0)
+        return (mean / max(float(np.linalg.norm(mean)), 1e-12)).astype(np.float32)
 
     def encode_image(self, image: Any):
         """Encode one BGR array or RGB PIL image."""

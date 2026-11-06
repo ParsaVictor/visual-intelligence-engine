@@ -295,6 +295,7 @@ def _run_video(args: argparse.Namespace, config: Config, as_json: bool) -> int:
 def _run_video_search(args: argparse.Namespace, config: Config, as_json: bool) -> int:
     from dataclasses import asdict
 
+    from vie.query import query_vector
     from vie.video.store import VideoStore
     from vie.video.understand import format_clock
 
@@ -323,7 +324,7 @@ def _run_video_search(args: argparse.Namespace, config: Config, as_json: bool) -
         else:
             moments = store.search_speech(conn, args.query, args.top_k)
             moments += store.search_visual(
-                conn, encoder.encode_text(args.query), top_k=args.top_k
+                conn, query_vector(encoder, args.query, config), top_k=args.top_k
             )
 
     if as_json:
