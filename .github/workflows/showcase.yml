@@ -1,0 +1,60 @@
+name: Showcase
+
+# Builds the search showcase (food, species, free text, Persian, photos-and-videos
+# concept search) with the real weights on public data, and commits the cards to
+# assets/showcase/search on the same branch. See scripts/make_search_showcase.py.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["claude/**"]
+    paths:
+      - "scripts/make_search_showcase.py"
+      - ".github/workflows/showcase.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  showcase:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the CPU stack
+        run: |
+          sudo apt-get update && sudo apt-get install -y libgl1 libglib2.0-0 libfribidi0 libraqm0
+          python -m pip install --upgrade pip
+          pip install "torch==2.5.1" "torchvision==0.20.1" \
+            --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[models,cpu,video]" arabic-reshaper python-bidi
+      - name: Cache model weights
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/torch
+            ~/.insightface
+          key: showcase-models-v1
+      - name: Fetch public data
+        run: |
+          python scripts/fetch_calibration_data.py data/public --per-label 2
+          mkdir -p data/videos
+          for name in classroom face-demographics-walking-and-pause; do
+            curl -sSL -o "data/videos/$name.mp4" \
+              "https://raw.githubusercontent.com/intel-iot-devkit/sample-videos/master/$name.mp4"
+          done
+      - name: Build the showcase
+        run: python scripts/make_search_showcase.py --data data/public --videos data/videos
+      - name: Commit the cards
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add assets/showcase/search
+          git commit -m "docs: search showcase built with the real models" || exit 0
+          git pull --rebase origin "${{ github.ref_name }}"
+          git push origin "HEAD:${{ github.ref_name }}"
