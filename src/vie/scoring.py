@@ -3,12 +3,12 @@
 The single best idea in the original project was in the food module: instead of
 thresholding a raw cosine similarity, it scored the user's query against two
 rival prompts and took a softmax. That gives the model an explicit "none of the
-above" option, so the number that comes out is a calibrated posterior rather
-than an uncalibrated distance.
+above" option.
 
-The animal module did not do this — it used an ImageNet classifier with no
-confidence floor at all, and shipped 21.5% top-1 results as confirmed matches.
-This module makes the good pattern the shared default.
+:func:`contrastive_score` is that softmax, which is right for CLIP. SigLIP is
+scored differently, by its margin over the strongest rival; both live in
+:func:`vie.vlm.hypothesis_score`, which is what the search paths call. This module
+keeps the softmax and the :class:`Match` record every path returns.
 """
 
 from __future__ import annotations

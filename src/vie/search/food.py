@@ -1,13 +1,15 @@
-"""Food search — detect tableware, then recognise the dish with CLIP.
+"""Food search: find plates and bowls, then recognise the dish with SigLIP.
 
-This module's decision rule is the one good idea the original project already
-had, kept intact: score the user's query against explicit rival prompts and take
-a softmax, rather than thresholding a raw similarity. That gives the model a
-"none of the above" option, which is why its demo scores read 96-99% while the
-free-text path's raw cosines read 23%.
+The decision rule is the best idea the original project had, kept: score the query
+against explicit rival prompts ("a completely different food", "an empty plate")
+instead of thresholding a raw similarity, which gives the model a way to say "none
+of these". :func:`vie.vlm.hypothesis_score` turns the logits into one number: a
+softmax posterior for CLIP, and for SigLIP the sigmoid of the margin over the
+strongest rival, which ``scripts/calibrate.py`` measured as the more stable cut.
 
-The animal path has since been rebuilt on the same pattern, so three of the four
-search paths now share one recognition rule.
+Candidates come from RT-DETR boxes on COCO's tableware and food classes, plus whole
+images the zero-cost SigLIP food gate admitted at index time, since a plate of
+ghormeh sabzi fires none of COCO's ten Western food classes.
 
 Fixed here: the search pass used a different COCO class list and a different
 confidence than indexing, which re-introduced class 56 (``chair``) — furniture

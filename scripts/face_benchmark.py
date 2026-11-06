@@ -133,9 +133,12 @@ def scores(emb: np.ndarray, idx) -> np.ndarray:
 
 
 def metrics(gen: np.ndarray, hard: np.ndarray, imp: np.ndarray, threshold: float) -> dict:
+    # Every observed score is a candidate threshold. Sorted arrays and searchsorted
+    # give FAR and FRR at all of them in O(n log n) instead of a loop over each.
     thresholds = np.unique(np.concatenate([gen, imp]))
-    far = np.array([(imp >= t).mean() for t in thresholds])
-    frr = np.array([(gen < t).mean() for t in thresholds])
+    imp_sorted, gen_sorted = np.sort(imp), np.sort(gen)
+    far = 1.0 - np.searchsorted(imp_sorted, thresholds, side="left") / len(imp)
+    frr = np.searchsorted(gen_sorted, thresholds, side="left") / len(gen)
     k = int(np.argmin(np.abs(far - frr)))
     zero_far = float(imp.max()) + 1e-6
     return {

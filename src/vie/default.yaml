@@ -62,6 +62,9 @@ models:
 
 face:
   # ArcFace embeddings are L2-normalised, so a dot product is cosine similarity.
+  # Measured in scripts/face_benchmark.py: the strongest different-person pair
+  # scored 0.30, while 98.9% of same-person pairs (97.6% at hard head poses)
+  # scored at least 0.46. Lower it for recall, raise it to be stricter.
   match_threshold: 0.46
 
   # Quality gate at index time. Deliberately permissive: the goal is only to
