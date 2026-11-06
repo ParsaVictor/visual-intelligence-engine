@@ -50,6 +50,33 @@ class Person:
         return max(self.sightings, key=size)
 
 
+def choose_exemplars(sightings: Sequence[Sighting], k: int) -> list[Sighting]:
+    """Up to ``k`` views that together cover how a person looked in a video.
+
+    The first is the most typical view (closest to the person's mean vector); each
+    next one is the view least like any already chosen (farthest-point sampling),
+    so a turned head or a change of light is kept rather than four near-copies of
+    the same frontal face. Searching against these instead of every sighting keeps
+    a person findable at a small, fixed cost per person.
+    """
+    if k <= 0 or not sightings:
+        return []
+    if len(sightings) <= k:
+        return list(sightings)
+    vectors = np.vstack([s.embedding for s in sightings]).astype(np.float32)
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+    mean = vectors.mean(axis=0)
+    chosen = [int(np.argmax(vectors @ mean))]
+    nearest = vectors @ vectors[chosen[0]]
+    while len(chosen) < k:
+        candidate = int(np.argmin(nearest))
+        if candidate in chosen:
+            break
+        chosen.append(candidate)
+        nearest = np.maximum(nearest, vectors @ vectors[candidate])
+    return [sightings[i] for i in sorted(chosen, key=lambda i: sightings[i].time)]
+
+
 def merge_times(times: Sequence[float], gap: float, pad: float = 0.0) -> list[Interval]:
     """Join timestamps closer than ``gap`` into intervals."""
     if not times:

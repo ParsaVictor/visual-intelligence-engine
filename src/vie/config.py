@@ -134,6 +134,7 @@ class VideoConfig:
     whisper_model: str = "small"
     whisper_device: str = "auto"
     face_cluster_threshold: float = 0.45
+    face_exemplars: int = 4
     min_face_sightings: int = 2
     presence_gap: float = 12.0
     label_threshold: float = 0.40

@@ -755,3 +755,31 @@ def test_cli_analyze_missing_file_is_a_clean_error(cfg, tmp_path, monkeypatch) -
 def test_cli_search_needs_exactly_one_query(cfg, tmp_path) -> None:
     code = cli.main(["video", "search", "--config", str(_config_file(cfg, tmp_path / "c.yaml"))])
     assert code == 2
+
+
+def test_exemplars_are_the_typical_view_then_the_most_different() -> None:
+    from vie.video.people import Sighting, choose_exemplars
+
+    frontal = [_vector(1.0, 0.02 * i, 0.0) for i in range(8)]
+    turned = _vector(0.6, 0.0, 0.8)
+    sightings = [Sighting(float(i), (0, 0, 10, 10), v) for i, v in enumerate(frontal)]
+    sightings.append(Sighting(99.0, (0, 0, 10, 10), turned))
+    picked = choose_exemplars(sightings, 2)
+    assert len(picked) == 2 and picked[-1].time == 99.0  # the turned head is kept
+    assert choose_exemplars(sightings[:1], 4) == sightings[:1]
+    assert choose_exemplars(sightings, 0) == []
+
+
+def test_face_storage_is_capped_per_person_and_search_still_finds_them(
+    clip: Path, cfg: Config
+) -> None:
+    index_videos(cfg, engine(cfg, face_detector=FakeFaces()))
+    store = VideoStore(cfg)
+    with store.connect() as conn:
+        per_person = conn.execute(
+            "SELECT person, COUNT(*) FROM video_faces GROUP BY person").fetchall()
+        spans = conn.execute("SELECT COUNT(*) FROM video_person_spans").fetchone()[0]
+        moments = store.search_face(conn, np.eye(512, dtype=np.float32)[0])
+    assert per_person and all(count <= cfg.video.face_exemplars for _, count in per_person)
+    assert spans >= 1
+    assert moments and moments[0].kind == "face" and moments[0].start >= 11.0

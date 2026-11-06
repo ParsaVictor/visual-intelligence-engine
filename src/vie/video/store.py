@@ -19,7 +19,7 @@ from vie.config import Config
 from vie.database import Index, format_box
 from vie.embeddings import from_blob, to_blob
 from vie.video.engine import VideoAnalysis
-from vie.video.people import Interval, merge_times
+from vie.video.people import Interval, choose_exemplars, merge_times
 
 VIDEO_SCHEMA = """
 CREATE TABLE IF NOT EXISTS videos (
@@ -48,6 +48,17 @@ CREATE TABLE IF NOT EXISTS video_faces (
     person    INTEGER NOT NULL,
     embedding BLOB NOT NULL,
     PRIMARY KEY (video_key, time, bbox),
+    FOREIGN KEY (video_key) REFERENCES videos (video_key) ON DELETE CASCADE
+);
+
+-- When each person is on screen, as intervals. Their face vectors are only the few
+-- exemplars in video_faces, so this is what a face search reports back.
+CREATE TABLE IF NOT EXISTS video_person_spans (
+    video_key TEXT NOT NULL,
+    person    INTEGER NOT NULL,
+    start     REAL NOT NULL,
+    end       REAL NOT NULL,
+    PRIMARY KEY (video_key, person, start),
     FOREIGN KEY (video_key) REFERENCES videos (video_key) ON DELETE CASCADE
 );
 
@@ -180,13 +191,20 @@ class VideoStore:
                     "VALUES (?, ?, ?, ?)",
                     (key, frame.time, frame.shot, to_blob(frame.vector)),
                 )
+            exemplars = self.config.video.face_exemplars
             for person in analysis.people:
-                for sighting in person.sightings:
+                for sighting in choose_exemplars(person.sightings, exemplars):
                     conn.execute(
                         "INSERT OR REPLACE INTO video_faces "
                         "(video_key, time, bbox, person, embedding) VALUES (?, ?, ?, ?, ?)",
                         (key, sighting.time, format_box(sighting.box), person.id,
                          to_blob(sighting.embedding)),
+                    )
+                for span in person.intervals:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO video_person_spans "
+                        "(video_key, person, start, end) VALUES (?, ?, ?, ?)",
+                        (key, person.id, span.start, span.end),
                     )
             for segment in analysis.transcript:
                 conn.execute(
@@ -273,30 +291,51 @@ class VideoStore:
     def search_face(
         self, conn: sqlite3.Connection, query: np.ndarray, top_k: int = 10
     ) -> list[Moment]:
-        """Where a given face appears, as intervals, across every video."""
+        """Where a given face appears, as intervals, across every video.
+
+        A person matches when any of their stored exemplar views clears the face
+        threshold, and the answer is every interval that person is on screen. An
+        index from before exemplars kept every sighting and has no spans; there the
+        matching sightings themselves are merged into intervals, as before.
+        """
         rows = conn.execute(
-            "SELECT f.video_key, v.file_path, f.time, f.embedding FROM video_faces f "
+            "SELECT f.video_key, v.file_path, f.time, f.person, f.embedding FROM video_faces f "
             "JOIN videos v USING (video_key)"
         ).fetchall()
         if not rows:
             return []
-        matrix = np.vstack([from_blob(r[3]) for r in rows])
+        matrix = np.vstack([from_blob(r[4]) for r in rows])
         scores = matrix @ np.asarray(query, dtype=np.float32).ravel()
         threshold = self.config.face.match_threshold
 
+        spans: dict[tuple[str, int], list[tuple[float, float]]] = {}
+        for key, person, start, end in conn.execute(
+            "SELECT video_key, person, start, end FROM video_person_spans"
+        ):
+            spans.setdefault((key, person), []).append((start, end))
+
+        best: dict[tuple[str, int], float] = {}
         hits: dict[str, list[tuple[float, float]]] = {}
         paths: dict[str, str] = {}
-        for (key, path, time, _), score in zip(rows, scores.tolist(), strict=True):
-            if score >= threshold:
+        for (key, path, time, person, _), score in zip(rows, scores.tolist(), strict=True):
+            if score < threshold:
+                continue
+            paths[key] = path
+            if (key, person) in spans:
+                best[(key, person)] = max(score, best.get((key, person), -1.0))
+            else:
                 hits.setdefault(key, []).append((time, score))
-                paths[key] = path
 
-        moments: list[Moment] = []
+        moments: list[Moment] = [
+            Moment(key, paths[key], start, end, score, "face")
+            for (key, person), score in best.items()
+            for start, end in spans[(key, person)]
+        ]
         for key, entries in hits.items():
             for span in _spans(entries, self.config.video.presence_gap):
                 inside = [s for t, s in entries if span.start <= t <= span.end]
                 moments.append(Moment(key, paths[key], span.start, span.end, max(inside), "face"))
-        moments.sort(key=lambda m: m.score, reverse=True)
+        moments.sort(key=lambda m: (-m.score, m.video_key, m.start))
         return moments[:top_k]
 
 

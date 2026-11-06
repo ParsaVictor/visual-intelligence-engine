@@ -213,6 +213,10 @@ video:
   whisper_device: auto     # auto | cpu | cuda
 
   face_cluster_threshold: 0.45  # the same ArcFace scale as face.match_threshold
+  # Face vectors kept per person per video, chosen to differ (frontal, turned, lit
+  # differently). Searching for someone compares against these; when they appear is
+  # stored as plain intervals. 4 keeps 1000 videos of ten people each under 100 MB.
+  face_exemplars: 4
   min_face_sightings: 2         # one glimpse is more likely a false detection
   presence_gap: 12.0            # seconds apart that still count as continuous
 
