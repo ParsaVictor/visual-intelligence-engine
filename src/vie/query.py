@@ -168,7 +168,14 @@ def _search_text(args, config: Config, index: Index, load_runtime) -> list[Match
     _, _, encoder = load_runtime(config)
     vector = query_vector(encoder, query, config)
     matches = text_search.rank_catalog(vector, catalog, paths, config, args.top_k)
-    return text_search.with_confidence(matches, getattr(encoder, "calibrated", None))
+    calibrate = getattr(encoder, "calibrated", None)
+    matches = text_search.with_confidence(matches, calibrate)
+    if config.min_probability > 0 and calibrate is not None and calibrate(0.0) is not None:
+        found = len(matches)
+        matches = [m for m in matches if m.display_score >= config.min_probability]
+        if found and not matches:
+            log.info("nothing cleared text.min_probability=%s", config.min_probability)
+    return matches
 
 
 # ── species ────────────────────────────────────────────────────────────

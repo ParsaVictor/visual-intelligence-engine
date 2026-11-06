@@ -9,6 +9,7 @@ on:
     branches: ["claude/**", "release/**"]
     paths:
       - "scripts/eval_search.py"
+      - "scripts/calibrate.py"
       - "src/vie/models.py"
       - "src/vie/default.yaml"
       - ".github/workflows/search-eval.yml"
@@ -46,8 +47,16 @@ jobs:
       - name: Evaluate
         # Whole frame only: the multi-crop layout is 6x the crops, too slow for a CPU runner.
         run: python scripts/eval_search.py benchmarks/search-data --model ${{ matrix.model }} --layout 1
+      - name: Food and species thresholds on this model
+        # The food, species and food-gate thresholds were calibrated on SigLIP; this
+        # reports precision and recall at the configured values for each model.
+        run: |
+          python scripts/calibrate.py benchmarks/search-data --model ${{ matrix.model }} \
+            --out benchmarks/calibration-${{ strategy.job-index }}.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: search-eval-${{ strategy.job-index }}
-          path: benchmarks/search-eval-*.json
+          path: |
+            benchmarks/search-eval-*.json
+            benchmarks/calibration-*.json

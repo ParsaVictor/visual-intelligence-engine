@@ -413,6 +413,13 @@ class VisionLanguageEncoder:
         """
         import numpy as np
 
+        from vie.vlm import has_right_to_left
+
+        if templates is None and has_right_to_left(text):
+            # Measured (scripts/eval_search.py): English phrasings around a Persian
+            # query, or Persian ones, never beat the query as typed, and cost SigLIP
+            # up to 0.32 mAP. A right-to-left query is encoded as it is.
+            templates = ["{query}"]
         templates = list(templates or self.bundle.config.query_templates or ["{query}"])
         prompts = [t.format(query=text) for t in templates]
         mean = self.encode_texts(prompts).mean(axis=0)

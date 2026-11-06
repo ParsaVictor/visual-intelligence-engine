@@ -173,6 +173,8 @@ class Config:
     models: dict[str, str]
     #: Phrasings a free-text query is averaged over; see ``encode_query``.
     query_templates: tuple[str, ...] = ("{query}",)
+    #: Below this calibrated probability a free-text result is not shown at all.
+    min_probability: float = 0.0
 
     # ---- construction -------------------------------------------------
 
@@ -211,6 +213,7 @@ class Config:
             model_cache=str(raw["paths"].get("model_cache", "") or ""),
             models=dict(raw["models"]),
             query_templates=tuple(raw["text"].get("query_templates") or ("{query}",)),
+            min_probability=float(raw["text"].get("min_probability", 0.0)),
         )
 
     # ---- validation ---------------------------------------------------

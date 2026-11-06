@@ -170,6 +170,13 @@ text:
     - "a picture showing {query}"
     - "a scene with {query}"
 
+  # "Nothing found" instead of the least-bad few. SigLIP's calibrated probability
+  # that the description fits, measured in scripts/eval_search.py on both SigLIP and
+  # SigLIP 2: the right image of a present concept scored at least 0.009, while the
+  # best image for 7 of 8 absent concepts scored under 0.001 (median 0.00001).
+  # 0 shows everything. Applies to SigLIP models only, which calibrate.
+  min_probability: 0.001
+
   # Multi-crop embeddings. One vector for the whole frame plus a 2x2 grid and
   # a centre crop; a query scores against the best-matching region.
   #

@@ -271,7 +271,10 @@ class Engine:
 
         frames = Path(frames_dir or tempfile.mkdtemp(prefix="vie-frames-"))
         clips: list[tuple[Match, str]] = []
+        floor = self.config.min_probability if calibrate is not None else 0.0
         for moment in moments:
+            if floor and probability(moment.score) < floor:
+                continue  # the same "nothing found" floor as photos
             picture = grab_frame(moment.file_path, moment.start, frames)
             if picture is None:
                 continue

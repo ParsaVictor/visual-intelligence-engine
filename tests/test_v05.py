@@ -455,3 +455,33 @@ def test_concept_search_returns_photos_and_video_moments(raw_config, tmp_path) -
     card = save_search_card(result.matches, tmp_path / "card.png", kind="concept",
                             query=result.query, badges=result.badges)
     assert card.is_file()
+
+
+# ── measured search defaults ──────────────────────────────────────────
+
+
+def test_a_persian_query_is_encoded_as_typed() -> None:
+    from vie.models import VisionLanguageEncoder
+
+    seen: list[list[str]] = []
+    encoder = VisionLanguageEncoder.__new__(VisionLanguageEncoder)
+    encoder.bundle = SimpleNamespace(config=SimpleNamespace(
+        query_templates=("{query}", "a photo of {query}")))
+    encoder.encode_texts = lambda prompts: seen.append(list(prompts)) or np.ones((len(prompts), 4))
+    encoder.encode_query("تئاتر")
+    encoder.encode_query("theatre")
+    assert seen == [["تئاتر"], ["theatre", "a photo of theatre"]]
+
+
+def test_nothing_found_floor_hides_improbable_text_results(cfg, raw_config) -> None:
+    from vie.query import run_search
+
+    stack = FakeStack(cfg)
+    stack.index()
+    request = SimpleNamespace(kind="text", query="something red", image=None, top_k=5)
+    shown = run_search(request, cfg, stack.load_runtime)
+    raw = copy.deepcopy(raw_config)
+    raw["paths"] = {"gallery": str(cfg.gallery_path), "database": str(cfg.database_path)}
+    raw["text"]["min_probability"] = 0.999
+    strict = Config.from_dict(raw)
+    assert shown and run_search(request, strict, stack.load_runtime) == []
