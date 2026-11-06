@@ -16,12 +16,18 @@ Identity, in order of preference:
 
 A track's identity is decided from its *mean* embedding over every frame seen so
 far, not from one frame, so a single blurred or turned frame cannot relabel it.
+
+Frames come from :func:`vie.video.decode.iter_decoded`, the decoder the analysis
+uses, so a portrait phone video is upright and a truncated file still renders up to
+the damage. The output has no audio track: it is for watching who appears, and
+copying audio would tie the encoder to the source's codec.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -208,12 +214,15 @@ class FaceTracker:
 
 
 def _encoder(path: Path, width: int, height: int, fps: float):
+    """An H.264 writer where the build has one, MPEG-4 Part 2 otherwise."""
     import av
 
-    container = av.open(str(path), mode="w")
+    # faststart moves the index to the front, so a browser can play while loading.
+    container = av.open(str(path), mode="w", options={"movflags": "+faststart"})
     for codec in ("libx264", "h264", "libopenh264", "mpeg4"):
         try:
-            stream = container.add_stream(codec, rate=round(fps))
+            # A fraction keeps 29.97 fps at 29.97; rounding to 30 drifts 3.6 s an hour.
+            stream = container.add_stream(codec, rate=Fraction(fps).limit_denominator(1001))
             break
         except Exception:  # noqa: BLE001 - try the next encoder this build has
             continue
@@ -222,7 +231,7 @@ def _encoder(path: Path, width: int, height: int, fps: float):
     stream.width, stream.height = width, height
     stream.pix_fmt = "yuv420p"
     if stream.codec_context.name == "libx264":
-        stream.options = {"crf": "20", "preset": "veryfast", "movflags": "+faststart"}
+        stream.options = {"crf": "20", "preset": "veryfast"}
     return container, stream
 
 
@@ -264,6 +273,7 @@ def render_annotated_video(
     is what :class:`vie.adapters.InsightFaceDetector` already produces, so faces here
     use exactly the recipe the index uses.
     """
+    import itertools
     import time
 
     import av
@@ -277,10 +287,12 @@ def render_annotated_video(
         PAPER,
         SIGNAL,
         SIGNAL_INK,
+        display_text,
         draw_brackets,
         font,
         pill,
     )
+    from vie.video import decode
 
     source, output = Path(source), Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -288,16 +300,20 @@ def render_annotated_video(
                           cluster_threshold=cluster_threshold,
                           max_missed=max(4, detect_every * 4))
 
-    reader = av.open(str(source))
-    stream = reader.streams.video[0]
-    stream.thread_type = "AUTO"
-    fps = float(stream.average_rate or 25)
-    duration = float(reader.duration / 1e6) if reader.duration else 0.0
+    info = decode.probe(source)
+    fps = info.fps or 25.0
+    duration = info.duration
     if max_seconds:
         duration = min(duration, max_seconds) if duration else max_seconds
-    src_w, src_h = stream.codec_context.width, stream.codec_context.height
-    scale = min(1.0, max_side / max(src_w, src_h))
-    out_w, out_h = int(src_w * scale) // 2 * 2, int(src_h * scale) // 2 * 2
+    decoded = decode.iter_decoded(source, max_side=max_side)
+    first = next(decoded, None)
+    if first is None:
+        raise decode.VideoDecodeError(f"{source} has no decodable frame")
+    # From a decoded frame, not the header: rotation swaps width and height.
+    out_h, out_w = (v // 2 * 2 for v in first.image.shape[:2])
+    # Shown in the strip and counted in the header only once seen this long, so a
+    # false detection that lasts a few frames never takes a lane.
+    min_frames = max(1, int(fps * min_seconds / 2))
     unit = max(14, out_h // 34)
     lane_pitch = int(unit * 1.15)
     strip_h = (lane_pitch * 5 + unit) // 2 * 2   # room for five people, always even
@@ -309,17 +325,11 @@ def render_annotated_video(
     frames = 0
     t = 0.0
     try:
-        for frame in reader.decode(stream):
-            t = float(frame.time) if frame.time is not None else frames / fps
+        for frame in itertools.chain([first], decoded):
+            t = frame.time
             if max_seconds and t > max_seconds:
                 break
-            image = frame.to_ndarray(format="bgr24")
-            if scale < 1.0:
-                import cv2
-
-                image = cv2.resize(image, (out_w, out_h), interpolation=cv2.INTER_AREA)
-            else:
-                image = image[:out_h, :out_w]
+            image = np.ascontiguousarray(frame.image[:out_h, :out_w])
             detected_now = frames % max(1, detect_every) == 0
             if detected_now:
                 tracker.update(detect(image))
@@ -340,10 +350,9 @@ def render_annotated_video(
                 draw_brackets(draw, (x1, y1, x2, y2), colour, width=max(2, unit // 6))
                 label = (f"{track.name}  {track.score * 100:.0f}%" if track.name
                          else "unknown" if tracker.known else "…")
-                rect = pill(draw, (x1, max(0, y1 - unit * 2)), label, f_label,
-                            colour if person else (40, 44, 52),
-                            SIGNAL_INK if person else PAPER, (unit // 2, unit // 4))
-                del rect
+                pill(draw, (x1, max(0, y1 - unit * 2)), label, f_label,
+                     colour if person else (40, 44, 52),
+                     SIGNAL_INK if person else PAPER, (unit // 2, unit // 4))
                 if person is not None:
                     on_screen += 1
                     if not person.present or t - person.present[-1] > 1e-6:
@@ -366,11 +375,19 @@ def render_annotated_video(
             hud_h = int(unit * 3.4)
             for k in range(hud_h):
                 draw.line([(0, k), (out_w, k)], fill=(0, 0, 0, int(170 * (1 - k / hud_h))))
-            draw.text((unit, unit * 0.6), (title or source.stem)[:60], font=f_title, fill=PAPER)
+            draw.text((unit, unit * 0.6), display_text((title or source.stem)[:60]), font=f_title,
+                      fill=PAPER)
             clock = _format_clock(t)
             cw = draw.textbbox((0, 0), clock, font=f_title)[2]
             draw.text((out_w - cw - unit, unit * 0.6), clock, font=f_title, fill=SIGNAL)
-            chips = [f"{on_screen} on screen", f"{len(tracker.people)} people so far"]
+            # On the same dark backing as the chips, so it reads over a bright window.
+            mark = "Visual Intelligence Engine"
+            mw = draw.textbbox((0, 0), mark, font=f_small)[2] + unit
+            pill(draw, (out_w - mw - unit, int(unit * 2.3)), mark, f_small, (0, 0, 0, 140),
+                 MUTED, (unit // 2, unit // 5))
+            lanes = [p for p in tracker.people if len(p.present) >= min_frames]
+            chips = [f"{on_screen} on screen",
+                     f"{len(lanes)} {'person' if len(lanes) == 1 else 'people'} so far"]
             if shot_labels is not None:
                 chips = shot_labels(t)[:2] + chips
             x = unit
@@ -382,13 +399,13 @@ def render_annotated_video(
             # ── presence timeline ────────────────────────────────────
             top = out_h
             draw.line([(0, top), (out_w, top)], fill=HAIR, width=1)
-            lanes = sorted(tracker.people, key=lambda p: -len(p.present))[:5]
+            lanes = lanes[:5]   # in order of first appearance, so lanes never reshuffle
             lane_h = max(4, lane_pitch - 6)
             span = duration or max(t, 1.0)
             label_w = int(unit * 7)
             for li, person in enumerate(lanes):
                 ly = top + unit // 2 + li * lane_pitch
-                draw.text((unit, ly - 3), person.label[:14], font=f_small, fill=MUTED)
+                draw.text((unit, ly - 3), display_text(person.label[:14]), font=f_small, fill=MUTED)
                 for seen in person.present:
                     px = label_w + int((out_w - label_w - unit) * min(1.0, seen / span))
                     draw.line([(px, ly), (px, ly + lane_h)], fill=person.colour, width=2)
@@ -407,16 +424,17 @@ def render_annotated_video(
             writer.mux(packet)
     finally:
         writer.close()
-        reader.close()
+        decoded.close()
 
     step = 1.0 / fps
     for person in tracker.people:
         if person.present:
             person.first, person.last = person.present[0], person.present[-1]
             person.seconds = len(person.present) * step
-    # Under a second on screen is more often a false detection than a person.
+    # Under ``min_seconds`` on screen is more often a false detection than a person.
+    # Kept in order of first appearance, which is also the order of their numbers.
     people = sorted((p for p in tracker.people if p.seconds >= min_seconds),
-                    key=lambda p: -p.seconds)
+                    key=lambda p: p.first)
     elapsed = time.perf_counter() - started
     log.info("annotated %d frames in %.1fs -> %s", frames, elapsed, output)
     return RenderResult(output, frames, t, people, frames / elapsed if elapsed else 0.0)
@@ -434,20 +452,23 @@ def render_people_card(result: RenderResult, *, title: str, width: int = 1600) -
         MUTED,
         PAPER,
         SIGNAL,
+        display_text,
         focus_crop,
         font,
         rounded,
     )
 
-    people = result.people[:8]
-    margin, gap, tile = 56, 36, 240
-    cols = max(1, min(len(people), (width - margin * 2 + gap) // (tile + gap)))
-    rows = max(1, -(-len(people) // cols))
+    people = result.people[:12]
+    margin, gap = 56, 36
+    # Balanced rows (7 people: 4 + 3, not 5 + 2), tiles as large as the width allows.
+    rows = max(1, -(-len(people) // 6))
+    cols = max(1, -(-len(people) // rows))
+    tile = min(300, (width - margin * 2 - gap * (cols - 1)) // cols)
     height = 230 + rows * (tile + 140) + 80
     canvas = Image.new("RGB", (width, height), INK)
     draw = ImageDraw.Draw(canvas, "RGBA")
     draw.text((margin, 50), "VIDEO UNDERSTANDING · PEOPLE", font=font(18, True), fill=SIGNAL)
-    draw.text((margin, 80), title[:60], font=font(46, True), fill=PAPER)
+    draw.text((margin, 80), display_text(title[:60]), font=font(46, True), fill=PAPER)
     draw.text((margin, 142), f"{len(result.people)} people · {result.frames:,} frames · "
               f"{_format_clock(result.seconds)} analysed · {result.fps_processed:.1f} frames/s",
               font=font(18), fill=MUTED)
@@ -464,7 +485,7 @@ def render_people_card(result: RenderResult, *, title: str, width: int = 1600) -
         canvas.paste(masked, (x, y), masked)
         draw.rounded_rectangle((x, y, x + tile, y + tile), radius=16, outline=person.colour,
                                width=3)
-        draw.text((x, y + tile + 12), person.label, font=font(22, True), fill=PAPER)
+        draw.text((x, y + tile + 12), display_text(person.label), font=font(22, True), fill=PAPER)
         draw.text((x, y + tile + 42), f"{person.seconds:.1f}s on screen", font=font(15),
                   fill=MUTED)
         draw.text((x, y + tile + 62), f"first seen {_format_clock(person.first)}", font=font(15),

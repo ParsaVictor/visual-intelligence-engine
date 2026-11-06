@@ -67,6 +67,7 @@ class IndexReport:
     pruned: int
     failed: int
     seconds: float
+    #: False when pruning was off or refused; see :func:`vie.pipeline.build_index`.
     pruning: bool = True
 
     @property
@@ -160,22 +161,15 @@ class Engine:
         read; everything else is skipped from its size and modification time, and if
         nothing changed no model is even loaded.
 
-        Pruning removes rows for files no longer on disk, but it is refused when most
-        of the archive seems to have vanished at once: that is a disconnected drive or
-        a mistyped path far more often than a real deletion.
+        Pruning removes rows for files no longer on disk, but :func:`build_index`
+        refuses it when most of the archive seems to have vanished at once: that is a
+        disconnected drive or a mistyped path far more often than a real deletion.
         """
         from vie.adapters import build_detectors
         from vie.models import SpeciesClassifier
-        from vie.pipeline import build_index, discover_images
+        from vie.pipeline import build_index
 
         config = self.config
-        found = len(discover_images(config.gallery_path, config.indexing.recursive))
-        known = self.counts()["images"]
-        if prune and known and found < known * 0.5:
-            log.warning("only %d of %d indexed images are on disk; not pruning. Check the "
-                        "gallery path and run again.", found, known)
-            prune = False
-
         bundle = self.bundle
         detectors = build_detectors(bundle, config)
         encoder = self.encoder
@@ -199,7 +193,8 @@ class Engine:
             on_progress=progress,
         )
         return IndexReport(stats.scanned, stats.indexed, stats.skipped, stats.pruned,
-                           stats.failed, time.perf_counter() - started, prune)
+                           stats.failed, time.perf_counter() - started,
+                           pruning=prune and not stats.prune_refused)
 
     # ── search ────────────────────────────────────────────────────────
 
@@ -231,11 +226,16 @@ class Engine:
     def search_text(self, query: str, top_k: int | None = None) -> SearchResult:
         return self._search("text", query=query, top_k=top_k or self.config.top_k)
 
-    def most_photographed_face(self, sample: int = 3000) -> Path | None:
-        """The photo of whoever appears most often: a sensible demo query.
+    def most_photographed_face(self, crop_to: str | Path | None = None,
+                               sample: int = 3000) -> Path | None:
+        """A photo of whoever appears most often: a sensible demo query.
 
         Counts, for a sample of indexed faces, how many others clear the match
-        threshold, and returns the image holding the best-connected face.
+        threshold, and picks the best-connected face, preferring a large one.
+
+        A query photo is searched by its *largest* face, which in a group photo
+        need not be the face that was picked. Give ``crop_to`` and the picked face
+        is saved there, padded, and that file is returned instead of the photo.
         """
         import numpy as np
 
@@ -246,6 +246,7 @@ class Engine:
         index = Index(self.config.database_path)
         with index.connect() as conn:
             rows = list(index.iter_faces(conn))
+            scales = index.scales(conn)
         if not rows:
             return None
         rng = np.random.default_rng(self.config.seed)
@@ -253,10 +254,25 @@ class Engine:
             rows = [rows[i] for i in rng.choice(len(rows), sample, replace=False)]
         vectors = np.vstack([np.asarray(r[2], dtype=np.float32) for r in rows])
         degree = (vectors @ vectors.T >= self.config.face.match_threshold).sum(axis=1)
-        # Prefer a large face among the best connected, for a clear query picture.
         area = np.array([(b[2] - b[0]) * (b[3] - b[1]) for _, b, _, _ in rows], dtype=float)
-        best = np.lexsort((-area, -degree))[0]
-        return Path(rows[best][3])
+        # lexsort's primary key is the last one: connections first, then size.
+        name, box, _, file_path = rows[int(np.lexsort((-area, -degree))[0])]
+        if crop_to is None:
+            return Path(file_path)
+
+        from vie.report.showcase import open_rgb
+
+        photo = open_rgb(file_path, max_side=100_000)
+        # Boxes are stored at the scale the index saw; map back to the file.
+        scale = scales.get(name, 1.0) or 1.0
+        x1, y1, x2, y2 = (v / scale for v in box)
+        pad = 0.6 * max(x2 - x1, y2 - y1)
+        region = (max(0, int(x1 - pad)), max(0, int(y1 - pad)),
+                  min(photo.width, int(x2 + pad)), min(photo.height, int(y2 + pad)))
+        out = Path(crop_to)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        photo.crop(region).save(out, quality=95)
+        return out
 
     # ── presentation ──────────────────────────────────────────────────
 
@@ -346,7 +362,8 @@ class Engine:
 
         return render_annotated_video(
             source, output, detect=self.face_detect(), known=known, title=title,
-            shot_labels=shot_labeller(analysis) if analysis is not None else None,
+            shot_labels=(shot_labeller(analysis, self.config.video.label_threshold)
+                         if analysis is not None else None),
             match_threshold=self.config.face.match_threshold,
             cluster_threshold=self.config.video.face_cluster_threshold,
             **kwargs,
@@ -354,10 +371,17 @@ class Engine:
 
     def search_videos(self, query: str | None = None, image: str | Path | None = None,
                       top_k: int = 10) -> list[Any]:
-        """Moments across every indexed video, by description, speech or face."""
+        """Moments across every indexed video, by description and speech, or by face.
+
+        Give exactly one of ``query`` or ``image``. For a query, transcript hits come
+        first, as in ``vie video search``: a spoken word is an exact match, while a
+        visual score is a cosine on another scale, so the two are not merged by score.
+        """
         from vie.query import query_face_embedding
         from vie.video.store import VideoStore
 
+        if (query is None) == (image is None):
+            raise ValueError("give exactly one of query or image")
         store = VideoStore(self.config)
         store.initialise()
         with store.connect() as conn:
@@ -365,24 +389,31 @@ class Engine:
             if image is not None:
                 vector = query_face_embedding(image, self.config, self.bundle)
                 return store.search_face(conn, vector, top_k)
-            moments = store.search_speech(conn, query, top_k)
-            moments += store.search_visual(conn, self.encoder.encode_text(query), top_k=top_k)
-            return sorted(moments, key=lambda m: -m.score)[:top_k]
+            spoken = store.search_speech(conn, query, top_k)
+            seen = store.search_visual(conn, self.encoder.encode_text(query), top_k=top_k)
+            return (spoken + seen)[:top_k]
 
 
-def shot_labeller(analysis: Any) -> Callable[[float], list[str]]:
-    """``time -> the shot's labels``, for the annotated video's header."""
-    shots = list(getattr(analysis, "shots", []) or [])
+def shot_labeller(analysis: Any, threshold: float = 0.4) -> Callable[[float], list[str]]:
+    """``time -> the current shot's strongest labels``, for the video's header.
+
+    ``threshold`` is the same presence share as ``video.label_threshold``: a label
+    the analysis would not call present in a shot is not shown on it either.
+    """
+    import bisect
+
+    shots = sorted(getattr(analysis, "shots", []) or [], key=lambda shot: shot.start)
+    starts = [shot.start for shot in shots]
     labels = {item.shot: item for item in getattr(analysis, "shot_labels", []) or []}
 
     def at(t: float) -> list[str]:
-        for shot in shots:
-            if shot.start <= t < shot.end + 1e-6:
-                found = labels.get(shot.index)
-                if found is None:
-                    return []
-                ranked = sorted(found.labels.items(), key=lambda kv: -kv[1][1])
-                return [label for _, (label, score) in ranked if score >= 0.4][:2]
-        return []
+        position = bisect.bisect_right(starts, t) - 1
+        if position < 0 or t > shots[position].end + 1e-6:
+            return []
+        found = labels.get(shots[position].index)
+        if found is None:
+            return []
+        ranked = sorted(found.labels.values(), key=lambda pair: -pair[1])
+        return [label for label, score in ranked if score >= threshold][:2]
 
     return at

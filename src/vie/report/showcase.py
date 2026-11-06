@@ -8,14 +8,18 @@ colour, hairlines, and the photographs as the brightest thing on the page.
 Each tile is cropped around the detection rather than the centre of the photo,
 so the face, animal or dish that matched is what the viewer sees first.
 
-Only Latin text is drawn. Pillow does not shape Arabic script without libraqm,
-and unshaped Persian is worse than none; the notebook prints Persian around it.
+Persian and Arabic text (file names, people's names) is shaped right to left by
+Pillow's raqm layout when the build has it, which the PyPI wheels do; otherwise
+by ``arabic-reshaper`` and ``python-bidi`` if installed. Without either, Arabic
+script would come out as disconnected letters, so :func:`display_text` is applied
+to every string drawn.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -43,8 +47,23 @@ KIND_TITLES = {
 }
 
 
+#: What a score means, per search path, for the footnote and the score caption.
+SCORE_NOTES = {
+    "face": ("similarity", "ArcFace cosine similarity · the same person scores above "
+                           "the match threshold"),
+    "animal": ("confidence", "classifier probability, or SigLIP margin over rival prompts"),
+    "food": ("confidence", "SigLIP margin over rival prompts"),
+    "text": ("confidence", "SigLIP's calibrated probability that the description fits"),
+}
+
+
+@lru_cache(maxsize=64)
 def font(size: int, bold: bool = False) -> Any:
-    """A real TrueType face wherever one exists; Pillow's default otherwise."""
+    """A real TrueType face wherever one exists; Pillow's default otherwise.
+
+    DejaVu, which matplotlib ships, comes first: it covers Latin, Persian and
+    Arabic in one face. Cached, because looking a face up walks font folders.
+    """
     from PIL import ImageFont
 
     names = (["Inter-SemiBold.ttf", "DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf",
@@ -75,14 +94,44 @@ def font(size: int, bold: bool = False) -> Any:
         return ImageFont.load_default()
 
 
+def _has_raqm() -> bool:
+    try:
+        from PIL import features
+
+        return bool(features.check("raqm"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def display_text(text: str) -> str:
+    """Text ready for Pillow, with right-to-left scripts shaped where needed."""
+    if not any("\u0590" <= ch <= "\u08ff" or "\ufb1d" <= ch <= "\ufeff" for ch in text):
+        return text
+    if _has_raqm():
+        return text  # Pillow shapes and orders it itself
+    try:
+        import arabic_reshaper
+        from bidi.algorithm import get_display
+
+        return get_display(arabic_reshaper.reshape(text))
+    except ImportError:
+        return text
+
+
 def _text_width(draw: Any, text: str, face: Any) -> int:
     left, _, right, _ = draw.textbbox((0, 0), text, font=face)
     return right - left
 
 
-def _ellipsize(draw: Any, text: str, face: Any, width: int) -> str:
+def _ellipsize(draw: Any, text: str, face: Any, width: int, middle: bool = False) -> str:
+    """Shorten to fit ``width``. ``middle`` keeps the end, where file names differ."""
     if _text_width(draw, text, face) <= width:
         return text
+    if middle:
+        head, tail = text[: len(text) // 2], text[len(text) // 2:]
+        while head and tail and _text_width(draw, head + "…" + tail, face) > width:
+            head, tail = head[:-1], tail[1:]
+        return head + "…" + tail
     while text and _text_width(draw, text + "…", face) > width:
         text = text[:-1]
     return text + "…"
@@ -158,6 +207,7 @@ def pill(draw: Any, xy: tuple[int, int], text: str, face: Any,
          fill: tuple[int, int, int], ink: tuple[int, int, int], pad: tuple[int, int] = (10, 5)
          ) -> tuple[int, int, int, int]:
     x, y = xy
+    text = display_text(text)
     width = _text_width(draw, text, face)
     _, top, _, bottom = draw.textbbox((0, 0), text, font=face)
     rect = (x, y, x + width + pad[0] * 2, y + (bottom - top) + pad[1] * 2)
@@ -211,7 +261,7 @@ def render_search_card(
 
     # ── header ────────────────────────────────────────────────────────
     draw.text((margin, 50), KIND_TITLES.get(kind, "Search").upper(), font=f_eyebrow, fill=SIGNAL)
-    title = _ellipsize(draw, query, f_title, width - margin * 2)
+    title = _ellipsize(draw, display_text(query), f_title, width - margin * 2)
     draw.text((margin, 80), title, font=f_title, fill=PAPER)
     chips: list[str] = [f"{len(matches)} match" + ("" if len(matches) == 1 else "es")]
     if matches:
@@ -234,14 +284,17 @@ def render_search_card(
     left = margin
     # ── query column ─────────────────────────────────────────────────
     if side:
-        draw.text((margin, top), "QUERY", font=f_eyebrow, fill=MUTED)
+        count = min(3, len(query_images))
+        heading = "QUERY" if count == 1 else f"QUERY · {count} PHOTOS"
+        draw.text((margin, top), heading, font=f_eyebrow, fill=MUTED)
         y = top + 34
         for path in query_images[:3]:
             try:
                 tile, _ = focus_crop(open_rgb(path), (side, side), None)
             except Exception:  # noqa: BLE001 - one unreadable query must not stop the card
                 continue
-            canvas.paste(rounded(tile, 14), (margin, y), rounded(tile, 14))
+            masked = rounded(tile, 14)
+            canvas.paste(masked, (margin, y), masked)
             draw.rounded_rectangle((margin, y, margin + side, y + side), radius=14,
                                    outline=SIGNAL, width=2)
             y += side + 16
@@ -252,14 +305,16 @@ def render_search_card(
     if not shown:
         draw.text((left, top + 60), "Nothing in the index cleared the threshold.",
                   font=font(24), fill=MUTED)
+    from vie.report.theme import original_size
+
+    caption, note = SCORE_NOTES.get(kind, ("score", ""))
     for i, match in enumerate(shown):
         r, c = divmod(i, columns)
         x0 = left + c * (tile_w + gap)
         y0 = top + r * (tile_h + caption_h + gap)
         try:
             photo = open_rgb(match.file_path, 2400)
-            from vie.report.theme import original_size
-
+            # Boxes are in original-file pixels; the photo here may be smaller.
             original = original_size(match.file_path)
             box_scale = photo.size[0] / original[0] if original and original[0] else 1.0
             tile, box = focus_crop(photo, (tile_w, tile_h), match.box, box_scale)
@@ -285,10 +340,16 @@ def render_search_card(
         sw = _text_width(draw, score, f_score)
         draw.text((x0 + tile_w - sw, cy - 2), score, font=f_score,
                   fill=SIGNAL if i == 0 else PAPER)
-        name = _ellipsize(draw, Path(match.file_name).name, f_name, tile_w - sw - 16)
+        name = _ellipsize(draw, display_text(Path(match.file_name).stem), f_name,
+                          tile_w - sw - 16, middle=True)
         draw.text((x0, cy), name, font=f_name, fill=PAPER)
-        if match.label:
-            draw.text((x0, cy + 28), _ellipsize(draw, match.label, f_small, tile_w - sw - 16),
+        cw = _text_width(draw, caption, f_small)
+        draw.text((x0 + tile_w - cw, cy + 30), caption, font=f_small, fill=FAINT)
+        # The species or dish that matched; for free text the label is only the
+        # name of the crop region, which means nothing to a reader.
+        if match.label and kind in ("animal", "food"):
+            draw.text((x0, cy + 28),
+                      _ellipsize(draw, display_text(match.label), f_small, tile_w - cw - 16),
                       font=f_small, fill=MUTED)
         by = cy + 60
         draw.rounded_rectangle((x0, by, x0 + tile_w, by + 6), radius=3, fill=INK_3)
@@ -300,7 +361,6 @@ def render_search_card(
     draw.line([(margin, fy), (width - margin, fy)], fill=HAIR, width=1)
     draw.text((margin, fy + 20), f"Visual Intelligence Engine {__version__}", font=f_small,
               fill=FAINT)
-    note = "scores are calibrated per search path · boxes come from the index"
     draw.text((width - margin - _text_width(draw, note, f_small), fy + 20), note, font=f_small,
               fill=FAINT)
     return canvas
