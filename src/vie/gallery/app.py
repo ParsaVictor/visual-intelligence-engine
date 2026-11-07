@@ -18,8 +18,12 @@ from vie import __version__
 from vie.gallery import insights as gi
 from vie.gallery.engine import MODES, Gallery, Result, annotated, face_crop
 from vie.logging_setup import get_logger
+from vie.pipeline import IMAGE_SUFFIXES
 
 log = get_logger("gallery.app")
+
+#: Exactly what indexing reads, so the picker never accepts a file it would skip.
+UPLOAD_SUFFIXES = frozenset(IMAGE_SUFFIXES)
 
 CSS = """
 .gradio-container { max-width: 1320px !important; margin: 0 auto !important; }
@@ -68,7 +72,35 @@ HEADER = f"""
 </div>
 """
 
-TABLE_HEADERS = ["رتبه", "فایل", "امتیاز", "چه چیزی پیدا شد", "کادر (x1,y1,x2,y2)", "مسیر"]
+TABLE_HEADERS = ["رتبه", "فایل", "امتیاز", "چه چیزی پیدا شد", "همه‌ی موارد در عکس",
+                 "کادر (x1,y1,x2,y2)", "مسیر"]
+
+
+def everything_in(info: gi.Insights, file_name: str,
+                  matched: tuple[tuple, str] | None = None) -> tuple[tuple[tuple, str], ...]:
+    """Every box in a photo, labelled: the match first, then each person, animal, dish.
+
+    A result for "cat" that also holds a person shows both, so nothing in the photo is
+    silently left out of the picture.
+    """
+    boxes: list[tuple[tuple, str]] = [matched] if matched else []
+    photo = info.photos.get(file_name)
+    if photo is None:
+        return tuple(boxes)
+
+    def taken(box: tuple) -> bool:
+        return any(gi._same_object(tuple(box), tuple(b)) for b, _ in boxes)
+
+    for face in photo.faces:
+        if face.person and not taken(face.box):
+            boxes.append((face.box, info.people[face.person - 1].title))
+    for animal in photo.animals:
+        if not taken(animal.box):
+            boxes.append((animal.box, animal.species or animal.group_fa))
+    for box, _, _ in photo.dishes[:2]:
+        if not taken(box):
+            boxes.append((box, gi.dish_name(photo)))
+    return tuple(boxes)
 
 
 # ---- small helpers ----------------------------------------------------------
@@ -83,7 +115,7 @@ def _uri(image: Any, quality: int = 80) -> str:
 def _thumb(photo: gi.Photo, side: int = 220) -> str:
     try:
         return _uri(annotated(photo.file_path, (), side))
-    except OSError:
+    except Exception:
         return ""
 
 
@@ -103,7 +135,11 @@ def _rtl(text: str) -> str:
 # ---- overview ---------------------------------------------------------------
 
 
-def overview_html(gallery: Gallery) -> str:
+def overview_html(gallery: Gallery, people: bool = True, section: str = "all") -> str:
+    """The overview page. ``section`` is "tiles", "details" (no tiles, no people) or "all".
+
+    The live page shows the tiles, then a clickable people panel, then the details.
+    """
     info = gallery.insights
     photos = info.photos
     species = info.species()
@@ -124,15 +160,20 @@ def overview_html(gallery: Gallery) -> str:
         parts.append(f'<div class="tile"><b>{_fa_digits(value)}</b><span>{label}</span>'
                      f'<small>{html.escape(_fa_digits(small))}</small></div>')
     parts.append("</div>")
+    if section == "tiles":
+        return "".join(parts) + "</div>"
+    if section == "details":
+        parts, people = ['<div class="sg">'], False
 
-    parts.append("<h2>👥 افراد</h2>")
-    if info.people:
+    if people:
+        parts.append("<h2>👥 افراد</h2>")
+    if people and info.people:
         parts.append('<div class="people">')
         for person in info.people:
             face = person.best_face
             try:
                 picture = _uri(face_crop(photos[face.file_name].file_path, face.box), 85)
-            except OSError:
+            except Exception:
                 picture = ""
             parts.append(
                 f'<div class="person"><img src="{picture}" alt=""><div>'
@@ -140,7 +181,7 @@ def overview_html(gallery: Gallery) -> str:
                 f"</small></div>"
             )
         parts.append("</div>")
-    else:
+    elif people:
         parts.append('<div class="empty">هیچ چهره‌ای در گالری پیدا نشد.</div>')
 
     def groups(title: str, items: dict[str, list[str]], empty: str) -> None:
@@ -203,23 +244,27 @@ def overview_report(gallery: Gallery) -> Path:
 # ---- results ----------------------------------------------------------------
 
 
-def render_result(gallery: Gallery, result: Result) -> tuple[str, list, list, list[str]]:
+def render_result(gallery: Gallery, result: Result,
+                  show_boxes: bool = True) -> tuple[str, list, list, list[str]]:
     """Status line, picture grid, table and downloadable files for one search."""
     from vie.report.search import render_search_report
 
+    info = gallery.insights
     rows: list[list[Any]] = []
     pictures: list[tuple[Any, str]] = []
     for rank, match in enumerate(result.matches, 1):
         what = gallery.describe(match, result.mode)
         score = gallery.score_text(match, result.mode)
-        boxes = ((tuple(match.box), what),) if match.box else ()
+        matched = (tuple(match.box), what) if match.box else None
+        boxes = everything_in(info, match.file_name, matched) if show_boxes else ()
+        tags = "، ".join(info.tags(match.file_name)) if match.file_name in info.photos else ""
         try:
             picture = annotated(match.file_path, boxes)
-        except OSError:
+        except Exception:
             continue
         pictures.append((picture, _rtl(f"{_fa_digits(rank)}. {what} – {score} – "
                                        f"{Path(match.file_name).name}")))
-        rows.append([rank, match.file_name, score, what,
+        rows.append([rank, match.file_name, score, what, tags,
                      ",".join(map(str, match.box)) if match.box else "", match.file_path])
 
     title = MODES[result.mode]
@@ -268,18 +313,96 @@ def _styling() -> dict[str, Any]:
     return {"theme": _build_theme(gr), "css": CSS, "title": "گالری هوشمند"}
 
 
+def _fa_error(exc: Exception) -> str:
+    """What to tell the operator, in Persian. The details go to the log only."""
+    text = str(exc)
+    if any("؀" <= ch <= "ۿ" for ch in text):   # already written for the user
+        return text
+    low = text.lower()
+    if "no face detected" in low:
+        return "در این عکس چهره‌ی واضحی پیدا نشد؛ عکسی با چهره‌ی روشن و روبه‌رو انتخاب کنید."
+    if any(k in low for k in ("could not decode", "cannot identify image", "truncated",
+                              "decompression", "pi_heif", "heif")):
+        return "این فایل قابل خواندن نیست؛ یک عکس jpg یا png دیگر انتخاب کنید."
+    if isinstance(exc, FileNotFoundError) or "not found" in low:
+        return "عکس پیدا نشد؛ لطفاً دوباره انتخابش کنید."
+    if "database is locked" in low:
+        return "گالری در حال به‌روزرسانی است؛ چند ثانیه بعد دوباره امتحان کنید."
+    return "مشکلی پیش آمد؛ لطفاً دوباره امتحان کنید."
+
+
+def _readable(path: Any) -> bool:
+    """A query image PIL can open, checked before any model sees it."""
+    from PIL import Image
+
+    try:
+        with Image.open(path) as handle:
+            handle.verify()
+        return True
+    except Exception:
+        return False
+
+
+UNREADABLE = "این عکس قابل خواندن نیست (مثلاً HEIC آیفون یا فایل خراب)؛ لطفاً JPG یا PNG بدهید."
+
+
 def build_app(gallery: Gallery) -> Any:
     import gradio as gr
+
+    def SafeImage(**kwargs: Any) -> Any:  # noqa: N802 - used like the component it wraps
+        """A ``gr.Image`` that never fails inside Gradio: a file PIL cannot read (HEIC,
+        corrupt) reaches the guarded handler as its path, which then says so in Persian.
+
+        Wrapping the instance, not subclassing: Gradio writes a ``.pyi`` stub beside the
+        source of every component subclass.
+        """
+        image = gr.Image(**kwargs)
+        original = image.preprocess
+
+        def preprocess(payload: Any) -> Any:
+            try:
+                return original(payload)
+            except Exception:
+                log.warning("could not read a query image", exc_info=True)
+                path = getattr(payload, "path", None)
+                return str(path) if path else None
+
+        image.preprocess = preprocess
+        return image
 
     def info_now() -> gi.Insights:
         return gallery.insights
 
-    def failure(exc: Exception) -> tuple[str, list, list, None]:
-        return f"### ⚠️ {html.escape(str(exc))}", [], [], None
+    def safe(fn: Any, n_outputs: int, message_first: bool = True) -> Any:
+        """Run a handler; on any failure show a Persian line instead of a red toast.
 
-    def run(mode: str, query: str = "", image: Any = None, top_k: int = 24):
+        ``functools.wraps`` keeps the handler's signature visible: Gradio reads it to
+        decide which handlers receive click data (``gr.SelectData``).
+        """
+        import functools
+
+        @functools.wraps(fn)
+        def wrapper(*args: Any) -> Any:
+            try:
+                return fn(*args)
+            except Exception as exc:
+                log.exception("handler failed")
+                if n_outputs == 1:
+                    return gr.update()
+                first = f"⚠️ {html.escape(_fa_error(exc))}" if message_first else gr.update()
+                return (first, *(gr.update(),) * (n_outputs - 1))
+        return wrapper
+
+    def failure(exc: Exception) -> tuple[str, list, list, None]:
+        return f"### ⚠️ {html.escape(_fa_error(exc))}", [], [], None
+
+    def run(mode: str, query: str = "", image: Any = None, top_k: int = 24,
+            show_boxes: bool = True):
         try:
-            return render_result(gallery, gallery.search(mode, query, image, int(top_k)))
+            if image and not _readable(image):
+                return f"### ⚠️ {UNREADABLE}", [], [], None
+            return render_result(gallery, gallery.search(mode, query, image, int(top_k)),
+                                 bool(show_boxes))
         except Exception as exc:  # shown to the operator, who can simply try again
             log.exception("search failed")
             return failure(exc)
@@ -296,15 +419,46 @@ def build_app(gallery: Gallery) -> Any:
     def top_k_slider() -> Any:
         return gr.Slider(1, 100, value=24, step=1, label="حداکثر تعداد نتیجه")
 
-    info = gallery.insights
-    species_choices = info.species_names()
+    # ---- people: identified by one of their faces, never by a rank number ----
+
+    def person_cards():
+        cards = []
+        for p in info_now().people:
+            face = p.best_face
+            try:
+                picture = face_crop(info_now().photos[face.file_name].file_path, face.box, 220)
+            except Exception:
+                picture = None      # keep the card, so card index == person index
+            cards.append((picture if picture is not None else blank(),
+                          _rtl(f"{p.title} – {_fa_digits(len(p.photos))} عکس")))
+        return cards
+
+    def person_choices():
+        return [(f"{p.title} ({_fa_digits(len(p.photos))} عکس)", gi.person_key(p))
+                for p in info_now().people]
+
     dish_choices = [en for en, _ in gi.DISHES]
 
     with gr.Blocks(analytics_enabled=False, **_accepted(gr.Blocks, _styling())) as app:
         gr.HTML(HEADER)
+        boxes_on = gr.Checkbox(value=True, label="🔲 کشیدن کادر دور افراد، حیوانات و غذا "
+                               "(تیک را بردارید تا عکس‌ها بدون کادر نشان داده شوند)")
 
         with gr.Tab("📊 نمای کلی"):
-            overview = gr.HTML(overview_html(gallery))
+            overview = gr.HTML(overview_html(gallery, section="tiles"))
+            gr.Markdown("## 👥 افراد\nروی هر نفر کلیک کنید تا همین‌جا عکس‌هایش بیاید و "
+                        "نامش را تعیین یا عوض کنید.", elem_classes="rtl")
+            home_cards = gr.Gallery(value=person_cards(), label="افراد", columns=8,
+                                    height=280, object_fit="cover", allow_preview=False)
+            home_key = gr.State(None)
+            with gr.Row():
+                home_name = gr.Textbox(label="نام این شخص", scale=4,
+                                       placeholder="ابتدا روی یک نفر کلیک کنید")
+                home_save = gr.Button("💾 ذخیره نام", variant="primary", scale=1)
+            home_msg = gr.Markdown(elem_classes="rtl")
+            home_photos = gr.Gallery(label="عکس‌های این شخص", columns=4, height=520,
+                                     object_fit="contain")
+            overview_details = gr.HTML(overview_html(gallery, section="details"))
             with gr.Row():
                 refresh = gr.Button("🔄 به‌روزرسانی آمار")
                 export = gr.Button("⬇️ ساخت گزارش کامل گالری")
@@ -312,10 +466,12 @@ def build_app(gallery: Gallery) -> Any:
 
             def do_refresh():
                 gallery.refresh()
-                return overview_html(gallery)
+                return (overview_html(gallery, section="tiles"),
+                        overview_html(gallery, section="details"))
 
-            refresh.click(do_refresh, outputs=overview)
-            export.click(lambda: str(overview_report(gallery)), outputs=export_file)
+            refresh.click(safe(do_refresh, 2, message_first=False),
+                          outputs=[overview, overview_details])
+            export.click(safe(lambda: str(overview_report(gallery)), 1), outputs=export_file)
 
         with gr.Tab("🔎 جستجو"):
             gr.Markdown("هر نوع جستجو تب جدای خودش را دارد، تا معلوم باشد دنبال چه هستید. "
@@ -326,12 +482,13 @@ def build_app(gallery: Gallery) -> Any:
                             "پیدا می‌شود. اگر چند چهره در عکس باشد، بزرگ‌ترین چهره ملاک است.",
                             elem_classes="rtl")
                 with gr.Row():
-                    face_image = gr.Image(type="filepath", label="عکس شخص", height=260)
+                    face_image = SafeImage(type="filepath", label="عکس شخص", height=260)
                     with gr.Column():
                         face_k = top_k_slider()
                         face_go = gr.Button("پیدا کن", variant="primary")
                 face_out = outputs()
-                face_go.click(lambda i, k: run("face", "", i, k), [face_image, face_k], face_out)
+                face_go.click(lambda i, k, b: run("face", "", i, k, b),
+                              [face_image, face_k, boxes_on], face_out)
 
             with gr.Tab(MODES["name"]):
                 gr.Markdown("شخصی را که قبلا نام‌گذاری کرده‌اید با نامش پیدا کنید. "
@@ -344,10 +501,10 @@ def build_app(gallery: Gallery) -> Any:
                         name_k = top_k_slider()
                         name_go = gr.Button("پیدا کن", variant="primary")
                 name_out = outputs()
-                name_go.click(lambda n, k: run("name", n or "", None, k),
-                              [name_box, name_k], name_out)
+                name_go.click(lambda n, k, b: run("name", n or "", None, k, b),
+                              [name_box, name_k, boxes_on], name_out)
                 with gr.Accordion("➕ ثبت شخص جدید: یک عکس و یک نام", open=False), gr.Row():
-                    enroll_image = gr.Image(type="filepath", label="عکس شخص", height=220)
+                    enroll_image = SafeImage(type="filepath", label="عکس شخص", height=220)
                     with gr.Column():
                         enroll_name = gr.Textbox(label="نام", placeholder="مثلا: علی رضایی")
                         enroll_go = gr.Button("ثبت نام", variant="primary")
@@ -358,7 +515,7 @@ def build_app(gallery: Gallery) -> Any:
                             "پیدا شده انتخاب کنید. گونه‌های شناخته‌شده بدون اجرای مدل و "
                             "مستقیم از ایندکس جواب داده می‌شوند.", elem_classes="rtl")
                 with gr.Row():
-                    animal_pick = gr.Dropdown(choices=species_choices, value=None,
+                    animal_pick = gr.Dropdown(choices=info_now().species_names(), value=None,
                                               label="گونه‌های موجود در گالری")
                     animal_query = gr.Textbox(label="نام حیوان (انگلیسی)",
                                               placeholder="giant panda, cat, eagle, lion ...")
@@ -367,10 +524,10 @@ def build_app(gallery: Gallery) -> Any:
                         animal_go = gr.Button("پیدا کن", variant="primary")
                 animal_out = outputs()
                 animal_pick.change(lambda v: v or "", animal_pick, animal_query)
-                animal_go.click(lambda q, k: run("animal", q, None, k),
-                                [animal_query, animal_k], animal_out)
-                animal_query.submit(lambda q, k: run("animal", q, None, k),
-                                    [animal_query, animal_k], animal_out)
+                animal_go.click(lambda q, k, b: run("animal", q, None, k, b),
+                                [animal_query, animal_k, boxes_on], animal_out)
+                animal_query.submit(lambda q, k, b: run("animal", q, None, k, b),
+                                    [animal_query, animal_k, boxes_on], animal_out)
 
             with gr.Tab(MODES["food"]):
                 gr.Markdown("نام غذا را به انگلیسی بنویسید. غذاهای ایرانی هم پیدا می‌شوند، "
@@ -385,9 +542,10 @@ def build_app(gallery: Gallery) -> Any:
                         food_go = gr.Button("پیدا کن", variant="primary")
                 food_out = outputs()
                 food_pick.change(lambda v: v or "", food_pick, food_query)
-                food_go.click(lambda q, k: run("food", q, None, k), [food_query, food_k], food_out)
-                food_query.submit(lambda q, k: run("food", q, None, k),
-                                  [food_query, food_k], food_out)
+                food_go.click(lambda q, k, b: run("food", q, None, k, b),
+                              [food_query, food_k, boxes_on], food_out)
+                food_query.submit(lambda q, k, b: run("food", q, None, k, b),
+                                  [food_query, food_k, boxes_on], food_out)
 
             with gr.Tab(MODES["text"]):
                 gr.Markdown("هر چیزی را به انگلیسی توصیف کنید، مثل یک جمله. عکس با "
@@ -400,100 +558,95 @@ def build_app(gallery: Gallery) -> Any:
                         text_k = top_k_slider()
                         text_go = gr.Button("پیدا کن", variant="primary")
                 gr.Examples(["a football player", "a castle", "a snowy mountain",
-                             "a sunset over the sea", "a red car", "animals in the wild"],
+                             "a sunset over the sea", "a man with a dog", "animals in the wild"],
                             text_query, label="نمونه")
                 text_out = outputs()
-                text_go.click(lambda q, k: run("text", q, None, k), [text_query, text_k], text_out)
-                text_query.submit(lambda q, k: run("text", q, None, k),
-                                  [text_query, text_k], text_out)
+                text_go.click(lambda q, k, b: run("text", q, None, k, b),
+                              [text_query, text_k, boxes_on], text_out)
+                text_query.submit(lambda q, k, b: run("text", q, None, k, b),
+                                  [text_query, text_k, boxes_on], text_out)
 
             with gr.Tab(MODES["similar"]):
                 gr.Markdown("یک عکس بدهید؛ عکس‌های گالری که از نظر محتوا و صحنه به آن "
                             "شبیه‌اند، به ترتیب شباهت نشان داده می‌شوند.", elem_classes="rtl")
                 with gr.Row():
-                    similar_image = gr.Image(type="filepath", label="عکس نمونه", height=260)
+                    similar_image = SafeImage(type="filepath", label="عکس نمونه", height=260)
                     with gr.Column():
                         similar_k = gr.Slider(1, 100, value=12, step=1,
                                               label="حداکثر تعداد نتیجه")
                         similar_go = gr.Button("پیدا کن", variant="primary")
                 similar_out = outputs()
-                similar_go.click(lambda i, k: run("similar", "", i, k),
-                                 [similar_image, similar_k], similar_out)
+                similar_go.click(lambda i, k, b: run("similar", "", i, k, b),
+                                 [similar_image, similar_k, boxes_on], similar_out)
 
         with gr.Tab("👥 افراد"):
             gr.Markdown("چهره‌های همه‌ی عکس‌ها خودکار به افراد گروه‌بندی شده‌اند. روی هر "
                         "شخص کلیک کنید تا عکس‌هایش را ببینید و برایش نام بگذارید.",
                         elem_classes="rtl")
-
-            def person_cards():
-                return [
-                    (face_crop(info_now().photos[p.best_face.file_name].file_path,
-                               p.best_face.box, 220),
-                     _rtl(f"{p.title} – {_fa_digits(len(p.photos))} عکس"))
-                    for p in info_now().people
-                ]
-
-            def person_choices():
-                return [(f"{p.title} ({_fa_digits(len(p.photos))} عکس)", p.id)
-                        for p in info_now().people]
-
             people_cards = gr.Gallery(value=person_cards(), label="افراد", columns=8,
                                       height=300, object_fit="cover", allow_preview=False)
             with gr.Row():
                 person_pick = gr.Dropdown(choices=person_choices(), value=None,
                                           label="انتخاب شخص")
-                person_name = gr.Textbox(label="نام این شخص", placeholder="مثلا: Cristiano Ronaldo")
+                person_name = gr.Textbox(label="نام این شخص",
+                                         placeholder="مثلا: Cristiano Ronaldo")
                 person_save = gr.Button("💾 ذخیره نام", variant="primary")
             person_msg = gr.Markdown(elem_classes="rtl")
             person_photos = gr.Gallery(label="عکس‌های این شخص", columns=4, height=560,
                                        object_fit="contain")
 
-            def show_person(person_id):
-                person = next((p for p in info_now().people if p.id == person_id), None)
+            def show_person(key, show_boxes=True):
+                person = info_now().find_person(key)
                 if person is None:
                     return [], "", ""
                 items = []
-                for key in person.photos:
-                    photo = info_now().photos[key]
-                    boxes = tuple((f.box, person.title) for f in person.faces
-                                  if f.file_name == key)
-                    items.append((annotated(photo.file_path, boxes), Path(key).name))
+                for photo_key in person.photos:
+                    photo = info_now().photos.get(photo_key)
+                    if photo is None:
+                        continue
+                    try:
+                        boxes = everything_in(info_now(), photo_key) if show_boxes else ()
+                        items.append((annotated(photo.file_path, boxes),
+                                      Path(photo_key).name))
+                    except Exception:
+                        continue
                 message = f"**{html.escape(person.title)}**: {_fa_digits(len(person.photos))} عکس"
                 return items, person.name, message
 
             def pick_card(event: gr.SelectData):
                 people = info_now().people
-                return people[event.index].id if event.index < len(people) else None
+                return gi.person_key(people[event.index]) if event.index < len(people) else None
 
-            def save_name(person_id, name):
-                if person_id is None:
+            def save_name(key, name):
+                if not key:
                     return "ابتدا یک شخص را انتخاب کنید.", gr.update(), gr.update(), gr.update()
                 if not (name or "").strip():
                     return "یک نام بنویسید.", gr.update(), gr.update(), gr.update()
-                gallery.name_person(int(person_id), name)
+                person = gallery.name_person(key, name)
                 return (f"✅ نام «{html.escape(name.strip())}» ذخیره شد. حالا در تب جستجو با "
                         "این نام هم پیدا می‌شود.", person_cards(),
-                        gr.update(choices=person_choices(), value=person_id),
+                        gr.update(choices=person_choices(), value=gi.person_key(person)),
                         gr.update(choices=gallery.names.names()))
 
-            people_cards.select(pick_card, None, person_pick)
-            person_pick.change(show_person, person_pick, [person_photos, person_name, person_msg])
-            person_save.click(save_name, [person_pick, person_name],
+            people_cards.select(safe(pick_card, 1), None, person_pick)
+            person_pick.change(safe(show_person, 3, message_first=False),
+                               [person_pick, boxes_on],
+                               [person_photos, person_name, person_msg])
+            person_save.click(safe(save_name, 4), [person_pick, person_name],
                               [person_msg, people_cards, person_pick, name_box])
 
             def enroll(image, name):
                 if not image or not (name or "").strip():
                     return "یک عکس و یک نام لازم است.", gr.update(), gr.update(), gr.update()
-                try:
-                    found = gallery.enroll(name, image)
-                except Exception as exc:
-                    return f"⚠️ {html.escape(str(exc))}", gr.update(), gr.update(), gr.update()
+                if not _readable(image):
+                    return f"⚠️ {UNREADABLE}", gr.update(), gr.update(), gr.update()
+                found = gallery.enroll(name, image)
                 return (f"✅ «{html.escape(name.strip())}» ثبت شد و در "
                         f"{_fa_digits(found)} عکس پیدا شد.",
                         gr.update(choices=gallery.names.names(), value=name.strip()),
                         person_cards(), gr.update(choices=person_choices()))
 
-            enroll_go.click(enroll, [enroll_image, enroll_name],
+            enroll_go.click(safe(enroll, 4), [enroll_image, enroll_name],
                             [enroll_msg, name_box, people_cards, person_pick])
 
         with gr.Tab("🗂️ مرور گالری"):
@@ -505,18 +658,151 @@ def build_app(gallery: Gallery) -> Any:
                                          object_fit="contain")
             browse_table = gr.Dataframe(headers=["فایل", "برچسب‌ها", "مسیر"],
                                         label="لیست", wrap=True, interactive=False)
-            browse_pick.change(lambda v: browse(gallery, v), browse_pick,
+            browse_pick.change(safe(lambda v, b: browse(gallery, v, b), 3),
+                               [browse_pick, boxes_on],
                                [browse_status, browse_pictures, browse_table])
-            app.load(lambda: browse(gallery, "all"), None,
+            app.load(safe(lambda: browse(gallery, "all"), 3), None,
                      [browse_status, browse_pictures, browse_table])
 
+        with gr.Tab("➕ افزودن عکس"):
+            gr.Markdown("عکس‌های جدید را انتخاب یا اینجا رها کنید. در پوشه‌ی گالری ذخیره و "
+                        "پردازش می‌شوند و همه‌ی تب‌ها خودکار به‌روز می‌شوند. در این مدت "
+                        "جستجوها با داده‌ی قبلی کار می‌کنند.", elem_classes="rtl")
+            upload = gr.File(label="عکس‌ها (jpg، png، webp، jfif، bmp، tif)",
+                             file_count="multiple", file_types=sorted(UPLOAD_SUFFIXES))
+            upload_go = gr.Button("➕ افزودن به گالری و پردازش", variant="primary")
+            upload_status = gr.HTML()
+            upload_pictures = gr.Gallery(label="عکس‌های تازه اضافه‌شده", columns=5, height=360,
+                                         object_fit="contain")
+
+            def bar(done: int, total: int, text: str) -> str:
+                share = min(100.0, done / total * 100) if total else 0
+                return (f'<div class="sg"><div style="font-size:16px;margin-bottom:8px">{text}'
+                        f'</div><div style="background:#8883;border-radius:8px;height:18px">'
+                        f'<div style="width:{share:.0f}%;height:18px;border-radius:8px;'
+                        f'background:#e8912d;transition:width .4s"></div></div>'
+                        f'<div style="opacity:.7;margin-top:6px">{_fa_digits(done)} از '
+                        f'{_fa_digits(total)} عکس – {_fa_digits(f"{share:.0f}")}٪</div></div>')
+
+            upload_outputs = [upload_status, upload_pictures, overview, people_cards,
+                              person_pick, browse_pick, animal_pick, name_box, home_cards,
+                              overview_details, person_photos, person_name, person_msg]
+            unchanged = (gr.update(),) * (len(upload_outputs) - 2)
+
+            def add(files):
+                import threading
+
+                if not files:
+                    yield (bar(0, 0, "ابتدا عکس انتخاب کنید."), [], *unchanged)
+                    return
+                paths = [str(getattr(f, "path", None) or getattr(f, "name", f)) for f in files]
+                total = len(paths)
+                state = {"done": 0, "total": total, "error": None, "stats": None}
+
+                def progress(done, all_):
+                    state["done"], state["total"] = done, all_
+
+                def work():
+                    try:
+                        state["stats"] = gallery.add_photos(paths, progress)
+                    except Exception as exc:  # shown in the page
+                        log.exception("upload failed")
+                        state["error"] = exc
+
+                worker = threading.Thread(target=work, daemon=True)
+                started = time.perf_counter()
+                worker.start()
+                while worker.is_alive():
+                    seconds = time.perf_counter() - started
+                    text = ("⏳ در حال پردازش: تشخیص چهره، حیوان، غذا و ساخت بردار هر عکس "
+                            f"({_fa_digits(int(seconds))} ثانیه)")
+                    yield (bar(state["done"], state["total"], text), [], *unchanged)
+                    time.sleep(1)
+                if state["error"] is not None:
+                    yield (bar(0, total, f"⚠️ {html.escape(_fa_error(state['error']))}"),
+                           [], *unchanged)
+                    return
+                try:
+                    yield (bar(state["total"], state["total"], "🔄 به‌روزرسانی آمار و افراد..."),
+                           [], *unchanged)
+                    gallery.refresh()
+                    stats = state["stats"]
+                    fresh = []
+                    for path in getattr(stats, "added_paths", [])[:20]:
+                        try:
+                            fresh.append(annotated(path, everything_in(
+                                info_now(), Path(path).name)))
+                        except Exception:
+                            continue
+                    text = (f"✅ {_fa_digits(stats.indexed)} عکس اضافه و پردازش شد در "
+                            f"{_fa_digits(int(time.perf_counter() - started))} ثانیه. "
+                            "همه‌ی تب‌ها به‌روز شدند.")
+                    if getattr(stats, "duplicates", 0):
+                        text += f" {_fa_digits(stats.duplicates)} عکس از قبل در گالری بود."
+                    if getattr(stats, "unreadable", 0):
+                        text += (f" {_fa_digits(stats.unreadable)} فایل قابل خواندن نبود و "
+                                 "کنار گذاشته شد.")
+                    yield (bar(stats.indexed, max(1, stats.indexed), text), fresh,
+                           *fresh_page(), [], "", "")
+                except Exception as exc:
+                    log.exception("refresh after upload failed")
+                    yield (bar(0, total, f"⚠️ {html.escape(_fa_error(exc))}"), [], *unchanged)
+
+            upload_go.click(add, upload, upload_outputs)
+
+        def fresh_page():
+            """Every value fixed when the page was built, as the gallery is now."""
+            cards = person_cards()
+            return (overview_html(gallery, section="tiles"), cards,
+                    gr.update(choices=person_choices(), value=None),
+                    gr.update(choices=browse_choices(gallery)),
+                    gr.update(choices=info_now().species_names()),
+                    gr.update(choices=gallery.names.names()), cards,
+                    overview_html(gallery, section="details"))
+
+        # A reload or a second tab gets today's numbers, not the ones from start-up.
+        app.load(safe(fresh_page, 8, message_first=False), None,
+                 [overview, people_cards, person_pick, browse_pick, animal_pick, name_box,
+                  home_cards, overview_details])
+
+        # ---- the people panel on the first page ----
+
+        def home_show(key, show_boxes):
+            photos, name, message = show_person(key, show_boxes)
+            return photos, name, message
+
+        def home_save_name(key, name):
+            message, cards, pick, names = save_name(key, name)
+            return message, cards, cards, pick, names
+
+        home_cards.select(safe(pick_card, 1), None, home_key).then(
+            safe(home_show, 3, message_first=False), [home_key, boxes_on],
+            [home_photos, home_name, home_msg])
+        home_save.click(safe(home_save_name, 5), [home_key, home_name],
+                        [home_msg, home_cards, people_cards, person_pick, name_box])
+        home_name.submit(safe(home_save_name, 5), [home_key, home_name],
+                         [home_msg, home_cards, people_cards, person_pick, name_box])
+        # The switch re-draws what is on screen at once; searches use it on their next run.
+        boxes_on.change(safe(home_show, 3, message_first=False), [home_key, boxes_on],
+                        [home_photos, home_name, home_msg])
+        boxes_on.change(safe(show_person, 3, message_first=False), [person_pick, boxes_on],
+                        [person_photos, person_name, person_msg])
+        boxes_on.change(safe(lambda v, b: browse(gallery, v, b), 3), [browse_pick, boxes_on],
+                        [browse_status, browse_pictures, browse_table])
+
     return app
+
+
+def blank(size: int = 220) -> Any:
+    from PIL import Image
+
+    return Image.new("RGB", (size, size), (60, 64, 72))
 
 
 def browse_choices(gallery: Gallery) -> list[tuple[str, str]]:
     info = gallery.insights
     choices = [(f"همه‌ی عکس‌ها ({_fa_digits(len(info.photos))})", "all")]
-    choices += [(f"👤 {p.title} ({_fa_digits(len(p.photos))})", f"person:{p.id}")
+    choices += [(f"👤 {p.title} ({_fa_digits(len(p.photos))})", f"person:{gi.person_key(p)}")
                 for p in info.people]
     choices += [(f"🐾 {name} ({_fa_digits(len(keys))})", f"animal:{name}")
                 for name, keys in info.species().items()]
@@ -529,11 +815,13 @@ def browse_choices(gallery: Gallery) -> list[tuple[str, str]]:
     return choices
 
 
-def browse(gallery: Gallery, choice: str) -> tuple[str, list, list]:
+def browse(gallery: Gallery, choice: str, show_boxes: bool = True) -> tuple[str, list, list]:
     info = gallery.insights
     kind, _, value = (choice or "all").partition(":")
     if kind == "person":
-        person = next(p for p in info.people if str(p.id) == value)
+        person = info.find_person(value)
+        if person is None:
+            return "### این شخص در فهرست فعلی نیست؛ دوباره انتخاب کنید.", [], []
         keys, title = person.photos, person.title
     elif kind == "animal":
         keys, title = info.species().get(value, []), value
@@ -546,21 +834,15 @@ def browse(gallery: Gallery, choice: str) -> tuple[str, list, list]:
 
     pictures, rows = [], []
     for key in keys:
-        photo = info.photos[key]
-        boxes: list[tuple[tuple, str]] = []
-        if kind in {"person", "all"}:
-            boxes += [(f.box, info.people[f.person - 1].title) for f in photo.faces
-                      if f.person and (kind == "all" or str(f.person) == value)]
-        if kind in {"animal", "all"}:
-            boxes += [(a.box, a.species or a.group_fa) for a in photo.animals
-                      if kind == "all" or gi.group_title(a) == value]
-        if kind in {"food", "all"}:
-            boxes += [(b, gi.dish_name(photo)) for b, _, _ in photo.dishes[:1]]
+        photo = info.photos.get(key)
+        if photo is None:
+            continue
         tags = "، ".join(info.tags(key))
         try:
-            picture = annotated(photo.file_path, tuple(boxes))
+            picture = annotated(photo.file_path,
+                                everything_in(info, key) if show_boxes else ())
             pictures.append((picture, _rtl(f"{tags} – {Path(key).name}")))
-        except OSError:
+        except Exception:
             continue
         rows.append([key, tags, photo.file_path])
     return f"### {html.escape(title)}: {_fa_digits(len(keys))} عکس", pictures, rows
@@ -568,6 +850,14 @@ def browse(gallery: Gallery, choice: str) -> tuple[str, list, list]:
 
 def launch(gallery: Gallery, port: int = 7860, open_browser: bool = True,
            block: bool = True) -> Any:
+    import os
+
+    # Gradio checks its own address on start through httpx, which follows the Windows
+    # system proxy (a VPN on 127.0.0.1:10808 here). Without this, the page would not
+    # start whenever that VPN is off.
+    for key in ("NO_PROXY", "no_proxy"):
+        os.environ[key] = ",".join(filter(None, [os.environ.get(key, ""),
+                                                 "localhost,127.0.0.1,::1"]))
     app = build_app(gallery)
     return app.launch(
         server_name="127.0.0.1", server_port=port, inbrowser=open_browser,

@@ -243,8 +243,15 @@ class ModelBundle:
     @property
     def object_detector(self) -> Any:
         def build() -> Any:
+            import PIL.Image
+
+            original_open = PIL.Image.open
             from ultralytics import RTDETR
 
+            # Importing ultralytics replaces PIL.Image.open process-wide with a version
+            # that pip-installs pi-heif on the first file it cannot read. Put it back,
+            # so a bad file fails as it did before and nothing is ever installed.
+            PIL.Image.open = original_open
             model = RTDETR(str(self._weight_path(self.config.models["object_detector"])))
             log.info("loaded RT-DETR")
             return model

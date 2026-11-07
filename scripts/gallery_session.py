@@ -82,6 +82,15 @@ class Session:
         from vie.cache import configure_cache
 
         configure_cache(self.config.model_cache)
+        # Once the chosen model is on disk, run fully offline: nothing may wait on the
+        # network. A first-ever run, with no model yet, stays online to download it.
+        # This must happen before huggingface_hub, transformers or ultralytics import.
+        snapshot = (Path(self.config.model_cache) / "huggingface" / "hub"
+                    / f"models--{MODELS[model].replace('/', '--')}")
+        if snapshot.is_dir():
+            from vie.gallery.offline import go_offline
+
+            go_offline()
         from huggingface_hub import file_download
 
         file_download.are_symlinks_supported = lambda cache_dir=None: False

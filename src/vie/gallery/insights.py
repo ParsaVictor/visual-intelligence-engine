@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from PIL import Image as _PILImage
 
 from vie.config import Config
 from vie.database import Index, parse_box
@@ -23,6 +24,10 @@ from vie.embeddings import from_blob
 from vie.scoring import softmax
 from vie.species import GENERIC_TERMS
 from vie.video.people import Sighting, cluster_faces
+
+# Only local gallery files are opened, and OpenCV already indexes panoramas larger
+# than Pillow's decompression-bomb limit; without this one such photo breaks a page.
+_PILImage.MAX_IMAGE_PIXELS = None
 
 Box = tuple[int, int, int, int]
 
@@ -159,6 +164,9 @@ class Animal:
     probability: float
     detector_confidence: float
     class_id: int = -1
+    #: "detector": MegaDetector drew the box. "scene": the detector missed it and a
+    #: region of the photo was read as this animal (the box is that region).
+    source: str = "detector"
 
     @property
     def display(self) -> str:
@@ -177,6 +185,10 @@ class Photo:
     setting: tuple[str, str, float] | None = None
     dish: tuple[str, str, float] | None = None
     food_gate: bool = False
+    #: A region of the photo reads as a person, or as food, even when no face or food
+    #: box was found: someone seen from behind, a dish COCO has no class for.
+    person_scene: bool = False
+    food_scene: bool = False
 
 
 @dataclass
@@ -286,6 +298,18 @@ class Insights:
                 found.setdefault(value[1], []).append(key)
         return dict(sorted(found.items(), key=lambda kv: (-len(kv[1]), kv[0])))
 
+    def find_person(self, key: str | None) -> Person | None:
+        """The person who owns the face named by ``person_key``, as clustered now."""
+        if not key or "|" not in key:
+            return None
+        file_name, _, box = key.rpartition("|")
+        try:
+            wanted = tuple(int(v) for v in box.split(","))
+        except ValueError:
+            return None
+        return next((p for p in self.people for f in p.faces
+                     if f.file_name == file_name and tuple(f.box) == wanted), None)
+
     def person_of(self, file_name: str, box: Box | None) -> Person | None:
         if box is None:
             return None
@@ -300,6 +324,8 @@ class Insights:
         tags: list[str] = []
         names = [self.people[f.person - 1].title for f in photo.faces if f.person]
         tags += list(dict.fromkeys(names))
+        if not names and photo.person_scene:
+            tags.append("انسان")
         tags += list(dict.fromkeys(a.display for a in photo.animals))
         if is_food_photo(photo):
             tags.append(dish_name(photo))
@@ -328,8 +354,8 @@ def dish_name(photo: Photo) -> str:
 
 
 def is_food_photo(photo: Photo) -> bool:
-    """A dish the detector saw, or a photo whose main subject reads as food."""
-    if photo.dishes:
+    """A dish the detector saw, a region read as food, or a food-first photo."""
+    if photo.dishes or photo.food_scene:
         return True
     return bool(photo.subject and photo.subject[0] == FOOD_SUBJECT)
 
@@ -338,17 +364,40 @@ def fa_digits(value: Any) -> str:
     return str(value).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
 
 
+def _centre_inside(inner: Box, outer: Box) -> bool:
+    cx, cy = (inner[0] + inner[2]) / 2, (inner[1] + inner[3]) / 2
+    return outer[0] <= cx <= outer[2] and outer[1] <= cy <= outer[3]
+
+
 def _same_object(a: Box, b: Box) -> bool:
     """Each box's centre lies inside the other: one box, padded or not."""
-    def centre_in(inner: Box, outer: Box) -> bool:
-        cx, cy = (inner[0] + inner[2]) / 2, (inner[1] + inner[3]) / 2
-        return outer[0] <= cx <= outer[2] and outer[1] <= cy <= outer[3]
-
-    return centre_in(a, b) and centre_in(b, a)
+    return _centre_inside(a, b) and _centre_inside(b, a)
 
 
 def _close(a: Box, b: Box, slack: int = 2) -> bool:
     return all(abs(x - y) <= slack for x, y in zip(a, b, strict=True))
+
+
+def person_key(person: Person) -> str:
+    """A stable name for a person: one of their faces, not their rank.
+
+    Ids are ranks by photo count, so an upload can renumber everyone. A face keeps its
+    file and box, so the key finds whoever holds that face after any re-clustering.
+    """
+    face = person.best_face
+    return f"{face.file_name}|{','.join(str(int(v)) for v in face.box)}"
+
+
+def photo_path(config: Config, file_name: str, stored: str | None) -> str:
+    """The stored path while it exists, else the file under today's gallery folder.
+
+    The index records absolute paths; after the project or the photos move, the
+    gallery-relative key still finds the file.
+    """
+    if stored and Path(stored).is_file():
+        return stored
+    candidate = Path(config.gallery_path) / file_name
+    return str(candidate) if candidate.is_file() else (stored or str(candidate))
 
 
 def to_original(box: Box, scale: float) -> Box:
@@ -380,7 +429,7 @@ def load_photos(config: Config) -> tuple[dict[str, Photo], list[str]]:
     with index.connect() as conn:
         vocabulary = index.classifier_vocabulary(conn) or []
         photos = {
-            name: Photo(name, path, scale)
+            name: Photo(name, photo_path(config, name, path), scale)
             for name, path, scale in conn.execute(
                 "SELECT file_name, file_path, index_scale FROM gallery_meta ORDER BY file_name"
             )
@@ -619,6 +668,109 @@ def check_animals(
 name_unknown_animals = check_animals
 
 
+#: What a region of a photo can be. Animals as in ``ANIMAL_PROMPTS``, then a person,
+#: food, and rivals that let a region be "nothing of interest".
+SCENE_PROMPTS: list[tuple[str, str, str]] = [
+    *[p for p in ANIMAL_PROMPTS if p[1]],
+    ("a person", "person", "انسان"),
+    ("food or a dish", "food", "غذا"),
+    ("an object or a vehicle", "", ""),
+    ("a landscape, the sky or a plain background", "", ""),
+    ("a building or the inside of a room", "", ""),
+]
+#: A region must give one reading this share of all of them to count.
+SCENE_SHARE = 0.60
+
+
+def region_vectors(config: Config) -> dict[str, list[tuple[str, np.ndarray]]]:
+    """Every stored region vector, grouped by photo."""
+    index = Index(config.database_path)
+    found: dict[str, list[tuple[str, np.ndarray]]] = {}
+    with index.connect() as conn:
+        for name, region, blob in conn.execute(
+            "SELECT file_name, region, embedding FROM clip_embeddings"
+        ):
+            found.setdefault(name, []).append((region, from_blob(blob)))
+    return found
+
+
+def _region_boxes(photo: Photo, layout: str) -> dict[str, Box]:
+    """Each named region in original image coordinates, as indexing cut them."""
+    from PIL import Image
+
+    from vie.quality import crop_regions
+
+    with Image.open(photo.file_path) as handle:   # reads the header only
+        width, height = handle.size
+        if handle.getexif().get(0x0112, 1) in (5, 6, 7, 8):
+            width, height = height, width
+    if photo.scale != 1.0:
+        width, height = int(width * photo.scale), int(height * photo.scale)
+    return {
+        name: to_original(box, photo.scale)
+        for name, box in crop_regions(width, height, layout)
+    }
+
+
+def scene_check(
+    photos: dict[str, Photo],
+    regions: dict[str, list[tuple[str, np.ndarray]]],
+    encode_texts: Callable[[list[str]], np.ndarray],
+    to_logits: Callable[[np.ndarray], np.ndarray],
+    layout: str = "1+2x2+center",
+) -> None:
+    """Find what the detectors missed, from the region vectors stored at index time.
+
+    A photo of a man holding a cat can come back with the man and no cat: MegaDetector
+    gives every animal one chance, at one scale. Each photo was also encoded as six
+    regions (whole, four quadrants, centre), so each region is asked what it shows. A
+    region that clearly reads as an animal the photo does not already have adds that
+    animal, boxed by the region; one that reads as a person or as food marks the photo.
+    No image is decoded or encoded again.
+    """
+    if not regions:
+        return
+    texts = encode_texts([f"a photo of {p}" for p, _, _ in SCENE_PROMPTS])
+    for name, entries in regions.items():
+        photo = photos.get(name)
+        if photo is None:
+            continue
+        logits = to_logits(np.vstack([v for _, v in entries]) @ texts.T)
+        best: dict[str, tuple[float, str]] = {}
+        for (region, _), row in zip(entries, logits, strict=True):
+            probabilities = softmax([float(v) for v in row])
+            top = int(np.argmax(probabilities))
+            group = SCENE_PROMPTS[top][1]
+            if group and probabilities[top] >= SCENE_SHARE and (
+                group not in best or probabilities[top] > best[group][0]
+            ):
+                best[group] = (probabilities[top], region)
+        if "person" in best:
+            photo.person_scene = True
+        if "food" in best:
+            photo.food_scene = True
+        present = {a.group for a in photo.animals}
+        animals = {g: v for g, v in best.items() if g not in {"person", "food"}}
+        if not animals or all(g in present for g in animals):
+            continue
+        try:
+            boxes = _region_boxes(photo, layout)
+        except Exception:
+            continue
+        persian = {group: fa for _, group, fa in SCENE_PROMPTS}
+        detected = [a.box for a in photo.animals]
+        for group, (share, region) in animals.items():
+            if group in present or region not in boxes:
+                continue
+            # A region holding an animal the detector already boxed is most likely
+            # that same animal read differently, not a second one.
+            if any(_centre_inside(box, boxes[region]) for box in detected):
+                continue
+            photo.animals.append(Animal(
+                name, boxes[region], group, group, persian[group], share, 0.0, -1, "scene",
+            ))
+
+
 def build(
     config: Config,
     encoder: Any,
@@ -632,6 +784,9 @@ def build(
         rejected = check_animals(
             photos, crop_vectors, encoder.encode_texts, encoder.logits_from_similarity
         )
+    layout = config.crop_layout if config.multi_crop else "1"
+    scene_check(photos, region_vectors(config), encoder.encode_texts,
+                encoder.logits_from_similarity, layout)
     vectors = whole_vectors(config)
     for attribute, labels, subset in (
         ("subject", SUBJECTS, vectors),

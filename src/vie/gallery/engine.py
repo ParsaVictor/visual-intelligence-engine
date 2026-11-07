@@ -140,10 +140,15 @@ class Gallery:
         self._runtime: Any = None
         self._insights: gi.Insights | None = None
         self._lock = threading.RLock()
+        #: Only one upload indexes at a time; searches never wait for it.
+        self._index_lock = threading.Lock()
 
     # ---- models and overview -------------------------------------------
 
     def runtime(self, _config: Config | None = None) -> Any:
+        runtime = self._runtime          # lock-free once loaded: searches never queue
+        if runtime is not None:
+            return runtime
         with self._lock:
             if self._runtime is None:
                 from vie.models import VisionLanguageEncoder, load_all
@@ -156,28 +161,56 @@ class Gallery:
 
     @property
     def insights(self) -> gi.Insights:
+        info = self._insights            # the current snapshot, never None once built
+        if info is not None:
+            return info
         with self._lock:
             if self._insights is None:
-                started = time.perf_counter()
-                self._insights = gi.build(
-                    self.config, self.runtime()[2], self.names, crop_vectors=self._face_vectors
-                )
-                log.info("gallery overview built in %.1f s", time.perf_counter() - started)
+                self._insights = self._build()
             return self._insights
 
+    def _build(self) -> gi.Insights:
+        started = time.perf_counter()
+        info = gi.build(self.config, self.runtime()[2], self.names,
+                        crop_vectors=self._face_vectors)
+        log.info("gallery overview built in %.1f s", time.perf_counter() - started)
+        return info
+
     def _face_vectors(self, items: list[Any], kind: str) -> np.ndarray:
-        """Vision-language vectors of face or animal crops, cached like every other crop."""
+        """Vision-language vectors of face or animal crops, cached like every other crop.
+
+        A photo moved or deleted since indexing gets a zero vector: every prompt then
+        scores the same, so the face stays unconfirmed and the animal unchanged, and
+        one missing file cannot stop the gallery.
+        """
         index = Index(self.config.database_path)
         with index.connect() as conn:
-            paths = dict(conn.execute("SELECT file_name, file_path FROM gallery_meta"))
+            stored = dict(conn.execute("SELECT file_name, file_path FROM gallery_meta"))
         crop = face_crop if kind == "face" else box_crop
-        crops = [crop(paths[item.file_name], item.box, 384) for item in items]
-        return self.runtime()[1].vectors(crops)
+        crops, kept = [], []
+        for position, item in enumerate(items):
+            path = gi.photo_path(self.config, item.file_name, stored.get(item.file_name))
+            try:
+                crops.append(crop(path, item.box, 384))
+                kept.append(position)
+            except Exception as exc:
+                log.warning("skipping a %s crop of %s: %s", kind, item.file_name, exc)
+        dimension = self.runtime()[2].encode_texts(["a photo"]).shape[1]
+        vectors = np.zeros((len(items), dimension), dtype=np.float32)
+        if crops:
+            vectors[kept] = self.runtime()[1].vectors(crops)
+        return vectors
 
     def refresh(self) -> gi.Insights:
+        """Build a new snapshot, then swap it in: readers keep the old one meanwhile."""
         with self._lock:
-            self._insights = None
-            return self.insights
+            try:
+                self._insights = self._build()
+            except Exception:
+                if self._insights is None:
+                    raise
+                log.exception("refresh failed; keeping the previous overview")
+            return self._insights
 
     def warm_up(self) -> None:
         """Pay every first-query cost now: models, the overview, the crop cache."""
@@ -369,14 +402,120 @@ class Gallery:
             for name, score in ranked
         ]
 
+    # ---- adding photos --------------------------------------------------
+
+    def add_photos(self, files: list[str], progress: Any = None) -> Any:
+        """Copy photos into the gallery folder and index them in this process.
+
+        The models are already loaded here, so a new photo costs only its own
+        inference. ``progress(done, total)`` is called after each batch.
+        """
+        import shutil
+
+        from vie.adapters import build_detectors
+        from vie.database import content_hash
+        from vie.models import SpeciesClassifier
+        from vie.pipeline import IMAGE_SUFFIXES, build_index, gallery_key
+
+        folder = Path(self.config.gallery_path)
+        folder.mkdir(parents=True, exist_ok=True)
+        index = Index(self.config.database_path)
+        index.initialise()
+        with index.connect() as conn:
+            seen = {row[0] for row in index.known_files(conn).values()}
+
+        added: list[Path] = []
+        duplicates = skipped = 0
+        for source in map(Path, files):
+            if source.suffix.lower() not in IMAGE_SUFFIXES:
+                skipped += 1
+                continue
+            digest = content_hash(source)
+            if digest in seen:        # already in the gallery, or twice in this upload
+                duplicates += 1
+                continue
+            seen.add(digest)
+            target = folder / source.name
+            number = 1
+            while target.exists():
+                target = folder / f"{source.stem}-{number}{source.suffix}"
+                number += 1
+            shutil.copy2(source, target)
+            added.append(target)
+        if not added:
+            raise ValueError("این عکس‌ها از قبل در گالری بودند" if duplicates else
+                             "هیچ فایل عکسی (jpg، png، webp، jfif، bmp، tif) انتخاب نشد")
+
+        with self._index_lock:
+            with self._lock:
+                bundle, _, encoder = self.runtime()
+                detectors = build_detectors(bundle, self.config)
+            config = self.config
+
+            def report(stats: Any) -> None:
+                if progress is not None:
+                    progress(stats.indexed + stats.failed, max(1, stats.scanned - stats.skipped))
+
+            try:
+                # Not under self._lock: searches keep answering from the current
+                # snapshot while this runs, and refresh() swaps the new one in after.
+                stats = build_index(
+                    config, loader=detectors.loader, size_of=detectors.size_of,
+                    face_detector=detectors.face, animal_detector=detectors.animal,
+                    food_detector=detectors.food, embed_batch=encoder.embed_batch,
+                    food_gate=lambda vectors: encoder.food_gate_scores(vectors, config),
+                    classify_crops=SpeciesClassifier(bundle).classify, crop=detectors.crop,
+                    class_names=lambda: bundle.class_names, batch_size=1, prune=False,
+                    on_progress=report,
+                )
+            finally:
+                self.release_detectors()
+
+        # A file that would not decode has no row; remove it so it is not retried on
+        # every later upload, and report it instead.
+        with index.connect() as conn:
+            stored = set(index.known_files(conn))
+        good = [t for t in added if gallery_key(t, folder) in stored]
+        for broken in set(added) - set(good):
+            broken.unlink(missing_ok=True)
+        stats.added_paths = [str(t) for t in good]
+        stats.duplicates = duplicates
+        stats.unreadable = len(added) - len(good) + skipped
+        return stats
+
+    def release_detectors(self) -> None:
+        """Unload the models only indexing needs, so the next upload has memory to load.
+
+        Searching keeps the vision-language model and the face model; MegaDetector,
+        RT-DETR and the species classifier together hold about 1.5 GB and are needed
+        again only when photos are added.
+        """
+        import gc
+
+        bundle = self.runtime()[0]
+        with bundle._lock:
+            for key in ("animal", "object", "classifier"):
+                bundle._loaded.pop(key, None)
+        gc.collect()
+
     # ---- naming ---------------------------------------------------------
 
-    def name_person(self, person_id: int, name: str) -> None:
-        person = next((p for p in self.insights.people if p.id == person_id), None)
+    def name_person(self, key: str | int, name: str) -> gi.Person:
+        """Name the person who owns this face key (or, for old callers, this id).
+
+        Keys name one of the person's faces, so they keep pointing at the right person
+        after an upload changes how people are ranked and numbered.
+        """
+        people = self.insights.people
+        if isinstance(key, int) or str(key).isdigit():
+            person = next((p for p in people if p.id == int(key)), None)
+        else:
+            person = self.insights.find_person(str(key))
         if person is None:
-            raise ValueError(f"شخص {person_id} پیدا نشد")
+            raise ValueError("این شخص در فهرست فعلی نیست؛ دوباره انتخابش کنید.")
         self.names.add(name, [f.embedding for f in person.faces])
-        self.names.label(self.insights.people)
+        self.names.label(people)
+        return person
 
     def enroll(self, name: str, image: str | Path) -> int:
         """Add a named person from a photo of them; returns how many photos match."""
@@ -434,7 +573,9 @@ def _open(path: str, max_side: int) -> tuple[Any, tuple[int, int]]:
     return image, (width, height)
 
 
-@lru_cache(maxsize=512)
+#: Display copies are about 1.5 MB each; 160 covers a full page of results twice
+#: without holding the whole gallery in memory beside a 3.5 GB model.
+@lru_cache(maxsize=160)
 def annotated(path: str, boxes: tuple[tuple[Box, str], ...] = (), max_side: int = 720) -> Any:
     """A display copy of a photo with its boxes drawn and labelled."""
     from PIL import ImageDraw, ImageFont

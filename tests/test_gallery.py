@@ -229,3 +229,78 @@ def test_free_text_tail_below_the_floor_is_hidden() -> None:
     ])
     assert [m.file_name for m in kept] == ["castle.jpg"]
     assert hidden == 1
+
+
+# ---- several subjects in one photo ------------------------------------------
+
+
+def _scene_reads(*labels: str) -> tuple[np.ndarray, int]:
+    """One region vector per label, each reading clearly as that scene prompt."""
+    prompts = [p for p, _, _ in gi.SCENE_PROMPTS]
+    rows = [prompts.index(label) for label in labels]
+    return np.eye(len(prompts), dtype=np.float32)[rows], len(prompts)
+
+
+def _scene(photo: gi.Photo, *labels: str) -> None:
+    vectors, size = _scene_reads(*labels)
+    regions = ["whole", "tl", "tr", "bl", "br", "center"][: len(labels)]
+    gi.scene_check(
+        {photo.file_name: photo}, {photo.file_name: list(zip(regions, vectors, strict=True))},
+        lambda texts: np.eye(size, dtype=np.float32), lambda s: s * 20, layout="1+2x2+center",
+    )
+
+
+def _photo_on_disk(tmp_path, name: str = "p.png") -> gi.Photo:
+    from PIL import Image
+
+    path = tmp_path / name
+    Image.new("RGB", (400, 200)).save(path)
+    return gi.Photo(name, str(path), 1.0)
+
+
+def test_a_cat_the_detector_missed_beside_a_person_is_found(tmp_path) -> None:
+    """The reported case: the person was found and the cat was not."""
+    photo = _photo_on_disk(tmp_path)
+    photo.faces = [gi.Face(photo.file_name, (10, 10, 60, 60), _unit(1, 0, 0), person=1)]
+    _scene(photo, "a person", "a person", "a cat")          # whole, tl, tr
+    assert [(a.group, a.source) for a in photo.animals] == [("cat", "scene")]
+    assert photo.animals[0].box == (200, 0, 400, 100)        # the top-right quadrant
+    assert photo.person_scene
+
+
+def test_an_animal_the_detector_boxed_is_not_counted_twice(tmp_path) -> None:
+    photo = _photo_on_disk(tmp_path)
+    photo.animals = [gi.Animal(photo.file_name, (250, 20, 350, 90), "tabby", "cat", "گربه",
+                               0.9, 0.9, 281)]
+    _scene(photo, "a dog", "a dog", "a dog")                 # a misreading of that cat
+    assert [a.group for a in photo.animals] == ["cat"]
+
+
+def test_unclear_regions_add_nothing(tmp_path) -> None:
+    photo = _photo_on_disk(tmp_path)
+    prompts = [p for p, _, _ in gi.SCENE_PROMPTS]
+    torn = np.zeros((1, len(prompts)), dtype=np.float32)
+    torn[0, [prompts.index("a cat"), prompts.index("a dog")]] = 1.0   # 50/50
+    gi.scene_check({photo.file_name: photo}, {photo.file_name: [("whole", torn[0])]},
+                   lambda texts: np.eye(len(prompts), dtype=np.float32), lambda s: s * 20)
+    assert photo.animals == [] and not photo.person_scene
+
+
+def test_a_region_read_as_food_makes_it_a_food_photo(tmp_path) -> None:
+    photo = _photo_on_disk(tmp_path)
+    _scene(photo, "a person", "food or a dish")
+    assert gi.is_food_photo(photo)
+
+
+def test_results_box_everything_in_the_photo() -> None:
+    from vie.gallery.app import everything_in
+
+    photo = gi.Photo("p.jpg", "p.jpg", 1.0)
+    photo.faces = [gi.Face("p.jpg", (10, 10, 60, 60), _unit(1, 0, 0), person=1)]
+    photo.animals = [gi.Animal("p.jpg", (200, 0, 400, 100), "cat", "cat", "گربه", 0.8, 0.0,
+                               -1, "scene")]
+    person = gi.Person(1, photo.faces, _unit(1, 0, 0))
+    info = gi.Insights({"p.jpg": photo}, [person], "m")
+    boxes = everything_in(info, "p.jpg", ((200, 0, 400, 100), "cat"))
+    assert [label for _, label in boxes] == ["cat", "شخص ۱"]     # the cat is not repeated
+    assert info.tags("p.jpg")[:2] == ["شخص ۱", "گربه (cat)"]
