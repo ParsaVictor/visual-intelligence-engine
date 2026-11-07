@@ -34,7 +34,8 @@ from vie.quality import crop_regions
 
 log = get_logger("pipeline")
 
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+# .jfif is a JPEG under another name; browsers save downloads with it on Windows.
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".jfif", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
 
 def discover_images(root: str | Path, recursive: bool = True) -> list[Path]:

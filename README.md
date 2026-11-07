@@ -91,6 +91,11 @@ python -m vie.demo    # open the web demo
 
 Every search also takes `--json` for scripts and `--html report.html` for a shareable page.
 
+**Smart Gallery.** Open `run_all.ipynb`, set the gallery folder and press Run All. It
+indexes the folder and opens a page with the whole archive at a glance (people, animals,
+dishes, subjects) and every search mode, including search by a person's name and by a
+similar photo. See [the Smart Gallery](docs/smart-gallery.md).
+
 **On a small machine,** set `google/siglip-base-patch16-224` and `runtime.low_memory: true` in [the config](src/vie/default.yaml), and use `--labels-only` for video. A fast GPU is recommended for large archives.
 
 ## Measured

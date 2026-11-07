@@ -4,9 +4,11 @@
 # ─────────────────────────────────────────────────────────────
 
 # Source imagery and any derived biometric data
-gallery/
+# Anchored to the root: an unanchored "gallery/" also hid the src/vie/gallery package.
+/gallery/
 data/
 my_gallery/
+photos/
 *.db
 *.sqlite
 *.sqlite3
